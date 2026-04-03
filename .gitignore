@@ -1,3 +1,9 @@
+.*
+!.gitignore
+!.env.example
+!.github/
+!.devcontainer/
+
 .env
 __pycache__/
 archive/
