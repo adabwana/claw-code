@@ -1,14 +1,16 @@
-"""Python package placeholder for the archived `native_ts` subsystem."""
+"""Python package placeholder for the archived `native-ts` subsystem."""
 
 from __future__ import annotations
 
-from src._archive_helper import load_archive_metadata
+import json
+from pathlib import Path
 
-_SNAPSHOT = load_archive_metadata("native_ts")
+SNAPSHOT_PATH = Path(__file__).resolve().parent.parent / 'reference_data' / 'subsystems' / 'native_ts.json'
+_SNAPSHOT = json.loads(SNAPSHOT_PATH.read_text())
 
-ARCHIVE_NAME = _SNAPSHOT["archive_name"]
-MODULE_COUNT = _SNAPSHOT["module_count"]
-SAMPLE_FILES = tuple(_SNAPSHOT["sample_files"])
+ARCHIVE_NAME = _SNAPSHOT['archive_name']
+MODULE_COUNT = _SNAPSHOT['module_count']
+SAMPLE_FILES = tuple(_SNAPSHOT['sample_files'])
 PORTING_NOTE = f"Python placeholder package for '{ARCHIVE_NAME}' with {MODULE_COUNT} archived module references."
 
-__all__ = ["ARCHIVE_NAME", "MODULE_COUNT", "PORTING_NOTE", "SAMPLE_FILES"]
+__all__ = ['ARCHIVE_NAME', 'MODULE_COUNT', 'PORTING_NOTE', 'SAMPLE_FILES']

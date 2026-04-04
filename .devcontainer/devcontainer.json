@@ -1,0 +1,24 @@
+{
+  "name": "Claw Code (Rust)",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+  "remoteEnv": {
+    "ANTHROPIC_API_KEY": "${localEnv:ANTHROPIC_API_KEY}",
+    "ANTHROPIC_BASE_URL": "${localEnv:ANTHROPIC_BASE_URL}",
+    "XAI_API_KEY": "${localEnv:XAI_API_KEY}",
+    "XAI_BASE_URL": "${localEnv:XAI_BASE_URL}"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer"],
+      "settings": {
+        "rust-analyzer.linkedProjects": ["rust/Cargo.toml"],
+        "rust-analyzer.check.command": "clippy"
+      }
+    }
+  },
+  "postCreateCommand": "cd rust && cargo fetch"
+}
