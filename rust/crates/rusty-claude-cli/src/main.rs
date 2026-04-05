@@ -4643,18 +4643,19 @@ impl ApiClient for AnthropicRuntimeClient {
 
             push_prompt_cache_record(&self.client, &mut events);
 
-            if !saw_stop
-                && events.iter().any(|event| {
-                    matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
-                        || matches!(event, AssistantEvent::ToolUse { .. })
-                })
-            {
+            let has_content = events.iter().any(|event| {
+                matches!(event, AssistantEvent::TextDelta(text) if !text.is_empty())
+                    || matches!(event, AssistantEvent::ToolUse { .. })
+            });
+
+            if !saw_stop && has_content {
                 events.push(AssistantEvent::MessageStop);
             }
 
-            if events
-                .iter()
-                .any(|event| matches!(event, AssistantEvent::MessageStop))
+            if has_content
+                && events
+                    .iter()
+                    .any(|event| matches!(event, AssistantEvent::MessageStop))
             {
                 return Ok(events);
             }
