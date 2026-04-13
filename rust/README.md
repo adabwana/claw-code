@@ -34,10 +34,10 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 export ANTHROPIC_BASE_URL="https://your-proxy.com"
 ```
 
-Or authenticate via OAuth and let the CLI persist credentials locally:
+Or provide an OAuth bearer token directly:
 
 ```bash
-cargo run -p rusty-claude-cli -- login
+export ANTHROPIC_AUTH_TOKEN="anthropic-oauth-or-proxy-bearer-token"
 ```
 
 ## Mock parity harness
@@ -79,28 +79,29 @@ Primary artifacts:
 
 | Feature | Status |
 |---------|--------|
-| Anthropic API + streaming | ✅ |
-| OAuth login/logout | ✅ |
+| Anthropic / OpenAI-compatible provider flows + streaming | ✅ |
+| Direct bearer-token auth via `ANTHROPIC_AUTH_TOKEN` | ✅ |
 | Interactive REPL (rustyline) | ✅ |
 | Tool system (bash, read, write, edit, grep, glob) | ✅ |
 | Web tools (search, fetch) | ✅ |
-| Sub-agent orchestration | ✅ |
+| Sub-agent / agent surfaces | ✅ |
 | Todo tracking | ✅ |
 | Notebook editing | ✅ |
 | CLAUDE.md / project memory | ✅ |
-| Config file hierarchy (.claude.json) | ✅ |
+| Config file hierarchy (`.claw.json` + merged config sections) | ✅ |
 | Permission system | ✅ |
-| MCP server lifecycle | ✅ |
+| MCP server lifecycle + inspection | ✅ |
 | Session persistence + resume | ✅ |
-| Extended thinking (thinking blocks) | ✅ |
-| Cost tracking + usage display | ✅ |
+| Cost / usage / stats surfaces | ✅ |
 | Git integration | ✅ |
 | Markdown terminal rendering (ANSI) | ✅ |
 | Model aliases (opus/sonnet/haiku) | ✅ |
-| Slash commands (/status, /compact, /clear, etc.) | ✅ |
-| Hooks (PreToolUse/PostToolUse) | 🔧 Config only |
-| Plugin system | 📋 Planned |
-| Skills registry | 📋 Planned |
+| Direct CLI subcommands (`status`, `sandbox`, `agents`, `mcp`, `skills`, `doctor`) | ✅ |
+| Slash commands (including `/skills`, `/agents`, `/mcp`, `/doctor`, `/plugin`, `/subagent`) | ✅ |
+| Hooks (`/hooks`, config-backed lifecycle hooks) | ✅ |
+| Plugin management surfaces | ✅ |
+| Skills inventory / install surfaces | ✅ |
+| Machine-readable JSON output across core CLI surfaces | ✅ |
 
 ## Model Aliases
 
@@ -112,87 +113,94 @@ Short names resolve to the latest model versions:
 | `sonnet` | `claude-sonnet-4-6` |
 | `haiku` | `claude-haiku-4-5-20251213` |
 
-## CLI Flags
+## CLI Flags and Commands
 
-```
+Representative current surface:
+
+```text
 claw [OPTIONS] [COMMAND]
 
-Options:
-  --model MODEL                    Override the active model
-  --dangerously-skip-permissions   Skip all permission checks
-  --permission-mode MODE           Set read-only, workspace-write, or danger-full-access
-  --allowedTools TOOLS             Restrict enabled tools
-  --output-format FORMAT           Non-interactive output format (text or json)
-  --resume SESSION                 Re-open a saved session or inspect it with slash commands
-  --version, -V                    Print version and build information locally
+Flags:
+  --model MODEL
+  --output-format text|json
+  --permission-mode MODE
+  --dangerously-skip-permissions
+  --allowedTools TOOLS
+  --resume [SESSION.jsonl|session-id|latest]
+  --version, -V
 
-Commands:
-  prompt <text>      One-shot prompt (non-interactive)
-  login              Authenticate via OAuth
-  logout             Clear stored credentials
-  init               Initialize project config
-  status             Show the current workspace status snapshot
-  sandbox            Show the current sandbox isolation snapshot
-  agents             Inspect agent definitions
-  mcp                Inspect configured MCP servers
-  skills             Inspect installed skills
-  system-prompt      Render the assembled system prompt
+Top-level commands:
+  prompt <text>
+  help
+  version
+  status
+  sandbox
+  dump-manifests
+  bootstrap-plan
+  agents
+  mcp
+  skills
+  system-prompt
+  init
 ```
 
-For the current canonical help text, run `cargo run -p rusty-claude-cli -- --help`.
+The command surface is moving quickly. For the canonical live help text, run:
+
+```bash
+cargo run -p rusty-claude-cli -- --help
+```
 
 ## Slash Commands (REPL)
 
 Tab completion expands slash commands, model aliases, permission modes, and recent session IDs.
 
-| Command | Description |
-|---------|-------------|
-| `/help` | Show help |
-| `/status` | Show session status (model, tokens, cost) |
-| `/cost` | Show cost breakdown |
-| `/compact` | Compact conversation history |
-| `/clear` | Clear conversation |
-| `/model [name]` | Show or switch model |
-| `/permissions` | Show or switch permission mode |
-| `/config [section]` | Show config (env, hooks, model) |
-| `/memory` | Show CLAUDE.md contents |
-| `/diff` | Show git diff |
-| `/export [path]` | Export conversation |
-| `/resume [id]` | Resume a saved conversation |
-| `/session [id]` | Resume a previous session |
-| `/version` | Show version |
+The REPL now exposes a much broader surface than the original minimal shell:
 
-See [`../USAGE.md`](../USAGE.md) for examples covering interactive use, JSON automation, sessions, permissions, and the mock parity harness.
+- session / visibility: `/help`, `/status`, `/sandbox`, `/cost`, `/resume`, `/session`, `/version`, `/usage`, `/stats`
+- workspace / git: `/compact`, `/clear`, `/config`, `/memory`, `/init`, `/diff`, `/commit`, `/pr`, `/issue`, `/export`, `/hooks`, `/files`, `/release-notes`
+- discovery / debugging: `/mcp`, `/agents`, `/skills`, `/doctor`, `/tasks`, `/context`, `/desktop`
+- automation / analysis: `/review`, `/advisor`, `/insights`, `/security-review`, `/subagent`, `/team`, `/telemetry`, `/providers`, `/cron`, and more
+- plugin management: `/plugin` (with aliases `/plugins`, `/marketplace`)
+
+Notable claw-first surfaces now available directly in slash form:
+- `/skills [list|install <path>|help]`
+- `/agents [list|help]`
+- `/mcp [list|show <server>|help]`
+- `/doctor`
+- `/plugin [list|install <path>|enable <name>|disable <name>|uninstall <id>|update <id>]`
+- `/subagent [list|steer <target> <msg>|kill <id>]`
+
+See [`../USAGE.md`](../USAGE.md) for usage examples and run `cargo run -p rusty-claude-cli -- --help` for the live canonical command list.
 
 ## Workspace Layout
 
-```
+```text
 rust/
 ├── Cargo.toml              # Workspace root
 ├── Cargo.lock
 └── crates/
-    ├── api/                # Anthropic API client + SSE streaming
-    ├── commands/           # Shared slash-command registry
+    ├── api/                # Provider clients + streaming + request preflight
+    ├── commands/           # Shared slash-command registry + help rendering
     ├── compat-harness/     # TS manifest extraction harness
     ├── mock-anthropic-service/ # Deterministic local Anthropic-compatible mock
-    ├── plugins/            # Plugin registry and hook wiring primitives
-    ├── runtime/            # Session, config, permissions, MCP, prompts
+    ├── plugins/            # Plugin metadata, manager, install/enable/disable surfaces
+    ├── runtime/            # Session, config, permissions, MCP, prompts, auth/runtime loop
     ├── rusty-claude-cli/   # Main CLI binary (`claw`)
     ├── telemetry/          # Session tracing and usage telemetry types
-    └── tools/              # Built-in tool implementations
+    └── tools/              # Built-in tools, skill resolution, tool search, agent runtime surfaces
 ```
 
 ### Crate Responsibilities
 
-- **api** — HTTP client, SSE stream parser, request/response types, auth (API key + OAuth bearer)
-- **commands** — Slash command definitions and help text generation
-- **compat-harness** — Extracts tool/prompt manifests from upstream TS source
-- **mock-anthropic-service** — Deterministic `/v1/messages` mock for CLI parity tests and local harness runs
-- **plugins** — Plugin metadata, registries, and hook integration surfaces
-- **runtime** — `ConversationRuntime` agentic loop, `ConfigLoader` hierarchy, `Session` persistence, permission policy, MCP client, system prompt assembly, usage tracking
-- **rusty-claude-cli** — REPL, one-shot prompt, streaming display, tool call rendering, CLI argument parsing
-- **telemetry** — Session trace events and supporting telemetry payloads
-- **tools** — Tool specs + execution: Bash, ReadFile, WriteFile, EditFile, GlobSearch, GrepSearch, WebSearch, WebFetch, Agent, TodoWrite, NotebookEdit, Skill, ToolSearch, REPL runtimes
+- **api** — provider clients, SSE streaming, request/response types, auth (`ANTHROPIC_API_KEY` + bearer-token support), request-size/context-window preflight
+- **commands** — slash command definitions, parsing, help text generation, JSON/text command rendering
+- **compat-harness** — extracts tool/prompt manifests from upstream TS source
+- **mock-anthropic-service** — deterministic `/v1/messages` mock for CLI parity tests and local harness runs
+- **plugins** — plugin metadata, install/enable/disable/update flows, plugin tool definitions, hook integration surfaces
+- **runtime** — `ConversationRuntime`, config loading, session persistence, permission policy, MCP client lifecycle, system prompt assembly, usage tracking
+- **rusty-claude-cli** — REPL, one-shot prompt, direct CLI subcommands, streaming display, tool call rendering, CLI argument parsing
+- **telemetry** — session trace events and supporting telemetry payloads
+- **tools** — tool specs + execution: Bash, ReadFile, WriteFile, EditFile, GlobSearch, GrepSearch, WebSearch, WebFetch, Agent, TodoWrite, NotebookEdit, Skill, ToolSearch, and runtime-facing tool discovery
 
 ## Stats
 
