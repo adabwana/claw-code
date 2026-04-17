@@ -79,6 +79,7 @@ impl OpenAiCompatConfig {
             api_key_env: "OPENROUTER_API_KEY",
             base_url_env: "OPENROUTER_BASE_URL",
             default_base_url: DEFAULT_OPENROUTER_BASE_URL,
+            max_request_body_bytes: OPENAI_MAX_REQUEST_BODY_BYTES,
         }
     }
     /// Alibaba `DashScope` compatible-mode endpoint (Qwen family models).
