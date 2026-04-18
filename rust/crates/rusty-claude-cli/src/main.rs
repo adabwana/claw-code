@@ -56,15 +56,7 @@ use tools::{
     execute_tool, mvp_tool_specs, GlobalToolRegistry, RuntimeToolDefinition, ToolSearchOutput,
 };
 
-const FALLBACK_MODEL: &str = "claude-opus-4-6";
-
-fn default_model() -> String {
-    env::var("CLAW_MODEL")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| FALLBACK_MODEL.to_string())
-}
-
+const DEFAULT_MODEL: &str = "claude-opus-4-6";
 fn max_tokens_for_model(model: &str) -> u32 {
     if model.contains("opus") {
         32_000
@@ -405,7 +397,11 @@ impl CliOutputFormat {
 
 #[allow(clippy::too_many_lines)]
 fn parse_args(args: &[String]) -> Result<CliAction, String> {
-    let mut model = default_model();
+    // UPDATED TO ALLOW ENV CLAW_MODEL TO BE SET
+    let mut model = env::var("CLAW_MODEL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
     let mut output_format = CliOutputFormat::Text;
     let mut permission_mode_override = None;
     let mut wants_help = false;
@@ -1131,7 +1127,7 @@ fn config_model_for_current_dir() -> Option<String> {
 }
 
 fn resolve_repl_model(cli_model: String) -> String {
-    if cli_model != FALLBACK_MODEL {
+    if cli_model != DEFAULT_MODEL {
         return cli_model;
     }
     if let Some(env_model) = env::var("ANTHROPIC_MODEL")
@@ -1152,7 +1148,6 @@ fn provider_label(kind: ProviderKind) -> &'static str {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::Xai => "xai",
         ProviderKind::OpenAi => "openai",
-        ProviderKind::OpenRouter => "openrouter",
     }
 }
 
@@ -6784,6 +6779,25 @@ impl AnthropicRuntimeClient {
         tool_registry: GlobalToolRegistry,
         progress_reporter: Option<InternalPromptProgressReporter>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Dispatch to the correct provider at construction time.
+        // `ApiProviderClient` (exposed by the api crate as
+        // `ProviderClient`) is an enum over Anthropic / xAI / OpenAI
+        // variants, where xAI and OpenAI both use the OpenAI-compat
+        // wire format under the hood. We consult
+        // `detect_provider_kind(&resolved_model)` so model-name prefix
+        // routing (`openai/`, `gpt-`, `grok`, `qwen/`) wins over
+        // env-var presence.
+        //
+        // For Anthropic we build the client directly instead of going
+        // through `ApiProviderClient::from_model_with_anthropic_auth`
+        // so we can explicitly apply `api::read_base_url()` — that
+        // reads `ANTHROPIC_BASE_URL` and is required for the local
+        // mock-server test harness
+        // (`crates/rusty-claude-cli/tests/compact_output.rs`) to point
+        // claw at its fake Anthropic endpoint. We also attach a
+        // session-scoped prompt cache on the Anthropic path; the
+        // prompt cache is Anthropic-only so non-Anthropic variants
+        // skip it.
         let resolved_model = api::resolve_model_alias(&model);
         let client = match detect_provider_kind(&resolved_model) {
             ProviderKind::Anthropic => {
@@ -6793,7 +6807,17 @@ impl AnthropicRuntimeClient {
                     .with_prompt_cache(PromptCache::new(session_id));
                 ApiProviderClient::Anthropic(inner)
             }
-            ProviderKind::Xai | ProviderKind::OpenAi | ProviderKind::OpenRouter => {
+            ProviderKind::Xai | ProviderKind::OpenAi => {
+                // The api crate's `ProviderClient::from_model_with_anthropic_auth`
+                // with `None` for the anthropic auth routes via
+                // `detect_provider_kind` and builds an
+                // `OpenAiCompatClient::from_env` with the matching
+                // `OpenAiCompatConfig` (openai / xai / dashscope).
+                // That reads the correct API-key env var and BASE_URL
+                // override internally, so this one call covers OpenAI,
+                // OpenRouter, xAI, DashScope, Ollama, and any other
+                // OpenAI-compat endpoint users configure via
+                // `OPENAI_BASE_URL` / `XAI_BASE_URL` / `DASHSCOPE_BASE_URL`.
                 ApiProviderClient::from_model_with_anthropic_auth(&resolved_model, None)?
             }
         };
@@ -7938,6 +7962,11 @@ fn response_to_events(
 }
 
 fn push_prompt_cache_record(client: &ApiProviderClient, events: &mut Vec<AssistantEvent>) {
+    // `ApiProviderClient::take_last_prompt_cache_record` is a pass-through
+    // to the Anthropic variant and returns `None` for OpenAI-compat /
+    // xAI variants, which do not have a prompt cache. So this helper
+    // remains a no-op on non-Anthropic providers without any extra
+    // branching here.
     if let Some(record) = client.take_last_prompt_cache_record() {
         if let Some(event) = prompt_cache_record_to_runtime_event(record) {
             events.push(AssistantEvent::PromptCache(event));
@@ -8639,7 +8668,7 @@ mod tests {
         assert_eq!(
             parse_args(&[]).expect("args should parse"),
             CliAction::Repl {
-                model: FALLBACK_MODEL.to_string(),
+                model: DEFAULT_MODEL.to_string(),
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
                 base_commit: None,
@@ -8771,7 +8800,7 @@ mod tests {
             parse_args(&args).expect("args should parse"),
             CliAction::Prompt {
                 prompt: "hello world".to_string(),
-                model: FALLBACK_MODEL.to_string(),
+                model: DEFAULT_MODEL.to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: PermissionMode::DangerFullAccess,
@@ -9017,7 +9046,7 @@ mod tests {
         assert_eq!(
             parse_args(&args).expect("args should parse"),
             CliAction::Repl {
-                model: FALLBACK_MODEL.to_string(),
+                model: DEFAULT_MODEL.to_string(),
                 allowed_tools: None,
                 permission_mode: PermissionMode::ReadOnly,
                 base_commit: None,
@@ -9090,7 +9119,7 @@ mod tests {
         assert_eq!(
             parse_args(&args).expect("args should parse"),
             CliAction::Repl {
-                model: FALLBACK_MODEL.to_string(),
+                model: DEFAULT_MODEL.to_string(),
                 allowed_tools: Some(
                     ["glob_search", "read_file", "write_file"]
                         .into_iter()
@@ -9313,7 +9342,7 @@ mod tests {
         assert_eq!(
             parse_args(&["status".to_string()]).expect("status should parse"),
             CliAction::Status {
-                model: FALLBACK_MODEL.to_string(),
+                model: DEFAULT_MODEL.to_string(),
                 permission_mode: PermissionMode::DangerFullAccess,
                 output_format: CliOutputFormat::Text,
             }
@@ -9640,7 +9669,7 @@ mod tests {
                 .expect("prompt shorthand should still work"),
             CliAction::Prompt {
                 prompt: "help me debug".to_string(),
-                model: FALLBACK_MODEL.to_string(),
+                model: DEFAULT_MODEL.to_string(),
                 output_format: CliOutputFormat::Text,
                 allowed_tools: None,
                 permission_mode: crate::default_permission_mode(),
@@ -11546,7 +11575,7 @@ UU conflicted.rs",
         let mut runtime = build_runtime_with_plugin_state(
             Session::new(),
             "runtime-plugin-lifecycle",
-            FALLBACK_MODEL.to_string(),
+            DEFAULT_MODEL.to_string(),
             vec!["test system prompt".to_string()],
             true,
             false,

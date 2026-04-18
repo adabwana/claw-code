@@ -11,7 +11,6 @@ pub enum ProviderClient {
     Anthropic(AnthropicClient),
     Xai(OpenAiCompatClient),
     OpenAi(OpenAiCompatClient),
-    OpenRouter(OpenAiCompatClient),
 }
 
 impl ProviderClient {
@@ -31,9 +30,6 @@ impl ProviderClient {
             })),
             ProviderKind::Xai => Ok(Self::Xai(OpenAiCompatClient::from_env(
                 OpenAiCompatConfig::xai(),
-            )?)),
-            ProviderKind::OpenRouter => Ok(Self::OpenRouter(OpenAiCompatClient::from_env(
-                OpenAiCompatConfig::openrouter(),
             )?)),
             ProviderKind::OpenAi => {
                 // DashScope models (qwen-*) also return ProviderKind::OpenAi because they
@@ -56,7 +52,6 @@ impl ProviderClient {
             Self::Anthropic(_) => ProviderKind::Anthropic,
             Self::Xai(_) => ProviderKind::Xai,
             Self::OpenAi(_) => ProviderKind::OpenAi,
-            Self::OpenRouter(_) => ProviderKind::OpenRouter,
         }
     }
 
@@ -72,7 +67,7 @@ impl ProviderClient {
     pub fn prompt_cache_stats(&self) -> Option<PromptCacheStats> {
         match self {
             Self::Anthropic(client) => client.prompt_cache_stats(),
-            Self::Xai(_) | Self::OpenAi(_) | Self::OpenRouter(_) => None,
+            Self::Xai(_) | Self::OpenAi(_) => None,
         }
     }
 
@@ -80,7 +75,7 @@ impl ProviderClient {
     pub fn take_last_prompt_cache_record(&self) -> Option<PromptCacheRecord> {
         match self {
             Self::Anthropic(client) => client.take_last_prompt_cache_record(),
-            Self::Xai(_) | Self::OpenAi(_) | Self::OpenRouter(_) => None,
+            Self::Xai(_) | Self::OpenAi(_) => None,
         }
     }
 
@@ -90,9 +85,7 @@ impl ProviderClient {
     ) -> Result<MessageResponse, ApiError> {
         match self {
             Self::Anthropic(client) => client.send_message(request).await,
-            Self::Xai(client) | Self::OpenAi(client) | Self::OpenRouter(client) => {
-                client.send_message(request).await
-            }
+            Self::Xai(client) | Self::OpenAi(client) => client.send_message(request).await,
         }
     }
 
@@ -105,7 +98,7 @@ impl ProviderClient {
                 .stream_message(request)
                 .await
                 .map(MessageStream::Anthropic),
-            Self::Xai(client) | Self::OpenAi(client) | Self::OpenRouter(client) => client
+            Self::Xai(client) | Self::OpenAi(client) => client
                 .stream_message(request)
                 .await
                 .map(MessageStream::OpenAiCompat),

@@ -42,7 +42,6 @@ pub const SYSTEM_PROMPT_DYNAMIC_BOUNDARY: &str = "__SYSTEM_PROMPT_DYNAMIC_BOUNDA
 pub const FRONTIER_MODEL_NAME: &str = "Claude Opus 4.6";
 const MAX_INSTRUCTION_FILE_CHARS: usize = 4_000;
 const MAX_TOTAL_INSTRUCTION_CHARS: usize = 12_000;
-const MAX_GIT_DIFF_CHARS: usize = 20_000;
 
 /// Contents of an instruction file included in prompt construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,22 +269,8 @@ fn read_git_diff(cwd: &Path) -> Option<String> {
     if sections.is_empty() {
         None
     } else {
-        let combined = sections.join("\n\n");
-        Some(truncate_git_diff(&combined))
+        Some(sections.join("\n\n"))
     }
-}
-
-fn truncate_git_diff(diff: &str) -> String {
-    if diff.len() <= MAX_GIT_DIFF_CHARS {
-        return diff.to_string();
-    }
-    let truncated = &diff[..diff.floor_char_boundary(MAX_GIT_DIFF_CHARS)];
-    let last_newline = truncated.rfind('\n').unwrap_or(truncated.len());
-    format!(
-        "{}\n\n[git diff truncated — showing {MAX_GIT_DIFF_CHARS} of {} chars; commit or stash large changes to reduce prompt size]",
-        &truncated[..last_newline],
-        diff.len()
-    )
 }
 
 fn read_git_output(cwd: &Path, args: &[&str]) -> Option<String> {
