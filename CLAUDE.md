@@ -4,13 +4,10 @@ Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-s
 
 **Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-<<<<<<< HEAD
 ## 1. Think Before Coding
-=======
 ## Verification
 - Run Rust verification from repo root: `scripts/fmt.sh --check`; for formatting use `scripts/fmt.sh`. Run Rust clippy/tests from `rust/`: `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`
 - `src/` and `tests/` are both present; update both surfaces together when behavior changes.
->>>>>>> upstream/main
 
 **Don't assume. Don't hide confusion. Surface tradeoffs.**
 
