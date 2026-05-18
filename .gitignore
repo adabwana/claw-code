@@ -17,3 +17,5 @@ archive/
 .claw/sessions/
 .clawhip/
 status-help.txt
+# Legacy Python port session scratch artifacts
+.port_sessions/

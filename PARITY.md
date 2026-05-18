@@ -4,7 +4,11 @@ Scope: read-only comparison between the original TypeScript source at `/home/bel
 
 Method: compared feature surfaces, registries, entrypoints, and runtime plumbing only. No TypeScript source was copied.
 
-## Executive summary
+- Canonical document: this top-level `PARITY.md` is the file consumed by `rust/scripts/run_mock_parity_diff.py`.
+- Requested 9-lane checkpoint: **All 9 lanes merged on `main`.**
+- Current `main` HEAD: `ee31e00` (stub implementations replaced with real AskUserQuestion + RemoteTrigger).
+- Repository stats at this checkpoint: **292 commits on `main` / 293 across all branches**, **9 crates**, **48,599 tracked Rust LOC**, **2,568 test LOC**, **3 authors**, date range **2026-03-31 → 2026-04-03**.
+- Mock parity harness stats: **12 scripted scenarios**, **21 captured `/v1/messages` requests** in `rust/crates/rusty-claude-cli/tests/mock_parity_harness.rs`.
 
 The Rust port has a good foundation for:
 - Anthropic API/OAuth basics
@@ -24,7 +28,13 @@ Largest gaps:
 - **assistant orchestration** lacks TS hook-aware orchestration and remote/structured transports
 - **services** beyond core API/OAuth/MCP are mostly missing in Rust
 
----
+- [x] Scripted multi-tool turn coverage: `multi_tool_turn_roundtrip`
+- [x] Scripted bash coverage: `bash_stdout_roundtrip`
+- [x] Scripted permission prompt coverage: `bash_permission_prompt_approved`, `bash_permission_prompt_denied`
+- [x] Scripted plugin-path coverage: `plugin_tool_roundtrip`
+- [x] Behavioral diff/checklist runner: `rust/scripts/run_mock_parity_diff.py`
+- [x] Scripted session-compaction metadata coverage: `auto_compact_triggered`
+- [x] Scripted token/cost JSON coverage: `token_cost_reporting`
 
 ## tools/
 
@@ -169,12 +179,13 @@ Evidence:
 
 ## services/ (API client, auth, models, MCP)
 
-### TS exists
-Evidence:
-- API services under `src/services/api/*`.
-- OAuth services under `src/services/oauth/*`.
-- MCP services under `src/services/mcp/*`.
-- Additional service layers for analytics, prompt suggestion, session memory, plugin operations, settings sync, policy limits, team memory sync, notifier, voice, and more under `src/services/*`.
+- [ ] End-to-end MCP runtime lifecycle beyond the registry bridge now on `main`
+- [x] Output truncation (large stdout/file content)
+- [x] Session compaction behavior matching
+  - auto_compaction threshold from env
+- [x] Token counting / cost tracking accuracy
+- [x] Bash validation lane merged onto `main`
+- [ ] CI green on every commit
 
 ### Rust exists
 Evidence:
