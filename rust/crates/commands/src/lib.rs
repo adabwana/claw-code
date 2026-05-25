@@ -1180,6 +1180,9 @@ pub enum SlashCommand {
         count: Option<String>,
     },
     Unknown(String),
+    Team {
+        action: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1277,6 +1280,7 @@ impl SlashCommand {
             Self::Tag { .. } => "/tag",
             Self::OutputStyle { .. } => "/output-style",
             Self::AddDir { .. } => "/add-dir",
+            Self::Team { .. } => "/team",
             Self::Sandbox => "/sandbox",
             Self::Mcp { .. } => "/mcp",
             Self::Export { .. } => "/export",
@@ -2256,7 +2260,7 @@ pub fn handle_plugins_slash_command(
                 reload_runtime: true,
             })
         }
-        Some("uninstall") => {
+        Some("remove") | Some("uninstall") => {
             let Some(target) = target else {
                 return Ok(PluginsCommandResult {
                     message: "Usage: /plugins uninstall <plugin-id>".to_string(),
@@ -2297,12 +2301,9 @@ pub fn handle_plugins_slash_command(
                 reload_runtime: true,
             })
         }
-        Some(other) => Ok(PluginsCommandResult {
-            message: format!(
-                "Unknown /plugins action '{other}'. Use list, install, enable, disable, uninstall, or update."
-            ),
-            reload_runtime: false,
-        }),
+        Some(other) => Err(PluginError::CommandFailed(format!(
+            "unknown_plugins_action: '{other}' is not a supported /plugins action. Use list, install, enable, disable, uninstall, or update."
+        ))),
     }
 }
 
@@ -2323,7 +2324,10 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
             Ok(render_agents_report(&agents))
         }
         Some(args) if is_help_arg(args) => Ok(render_agents_usage(None)),
-        Some(args) => Ok(render_agents_usage(Some(args))),
+        Some(args) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown agents subcommand: {args}. Supported: list, help"),
+        )),
     }
 }
 
@@ -2344,7 +2348,10 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
             Ok(render_agents_report_json(cwd, &agents))
         }
         Some(args) if is_help_arg(args) => Ok(render_agents_usage_json(None)),
-        Some(args) => Ok(render_agents_usage_json(Some(args))),
+        Some(args) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown agents subcommand: {args}. Supported: list, help"),
+        )),
     }
 }
 
@@ -2796,7 +2803,11 @@ fn render_mcp_report_json_for(
                         runtime_config.mcp().get(server_name),
                     );
                     if let Some(map) = value.as_object_mut() {
-                        map.insert("status".to_string(), Value::String("ok".to_string()));
+                        // Only override status to "ok" if the server was found;
+                        // render_mcp_server_report_json already sets status:"error" for not-found.
+                        if map.get("found") == Some(&Value::Bool(true)) {
+                            map.insert("status".to_string(), Value::String("ok".to_string()));
+                        }
                         map.insert("config_load_error".to_string(), Value::Null);
                     }
                     Ok(value)
@@ -3226,7 +3237,12 @@ fn resolve_skill_install_source(source: &str, cwd: &Path) -> std::io::Result<Ski
     } else {
         cwd.join(candidate)
     };
-    let source = fs::canonicalize(&source)?;
+    let source = fs::canonicalize(&source).map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!("skill source '{}' not found: {e}", source.display()),
+        )
+    })?;
 
     if source.is_dir() {
         let prompt_path = source.join("SKILL.md");
@@ -3615,7 +3631,9 @@ fn render_agents_report_json(cwd: &Path, agents: &[AgentSummary]) -> Value {
         .count();
     json!({
         "kind": "agents",
+        "status": "ok",
         "action": "list",
+        "status": "ok",
         "working_directory": cwd.display().to_string(),
         "count": agents.len(),
         "summary": {
@@ -3697,7 +3715,9 @@ fn render_skills_report_json(skills: &[SkillSummary]) -> Value {
         .count();
     json!({
         "kind": "skills",
+        "status": "ok",
         "action": "list",
+        "status": "ok",
         "summary": {
             "total": skills.len(),
             "active": active,
@@ -3731,7 +3751,9 @@ fn render_skill_install_report(skill: &InstalledSkill) -> String {
 fn render_skill_install_report_json(skill: &InstalledSkill) -> Value {
     json!({
         "kind": "skills",
+        "status": "ok",
         "action": "install",
+        "status": "ok",
         "result": "installed",
         "invocation_name": &skill.invocation_name,
         "invoke_as": format!("${}", skill.invocation_name),
@@ -3874,6 +3896,7 @@ fn render_mcp_server_report_json(
         Some(server) => json!({
             "kind": "mcp",
             "action": "show",
+            "status": "ok",
             "working_directory": cwd.display().to_string(),
             "found": true,
             "server": mcp_server_json(server_name, server),
@@ -3881,6 +3904,8 @@ fn render_mcp_server_report_json(
         None => json!({
             "kind": "mcp",
             "action": "show",
+            "status": "error",
+            "error_kind": "server_not_found",
             "working_directory": cwd.display().to_string(),
             "found": false,
             "server_name": server_name,
@@ -3920,6 +3945,8 @@ fn render_agents_usage_json(unexpected: Option<&str>) -> Value {
     json!({
         "kind": "agents",
         "action": "help",
+        "ok": unexpected.is_none(),
+        "status": if unexpected.is_some() { "error" } else { "ok" },
         "usage": {
             "slash_command": "/agents [list|help]",
             "direct_cli": "claw agents [list|help]",
@@ -3949,6 +3976,8 @@ fn render_skills_usage_json(unexpected: Option<&str>) -> Value {
     json!({
         "kind": "skills",
         "action": "help",
+        "ok": unexpected.is_none(),
+        "status": if unexpected.is_some() { "error" } else { "ok" },
         "usage": {
             "slash_command": "/skills [list|install <path>|help|<skill> [args]]",
             "aliases": ["/skill"],
@@ -3991,6 +4020,8 @@ fn render_mcp_usage_json(unexpected: Option<&str>) -> Value {
     json!({
         "kind": "mcp",
         "action": "help",
+        "ok": unexpected.is_none(),
+        "status": if unexpected.is_some() { "error" } else { "ok" },
         "usage": {
             "slash_command": "/mcp [list|show <server>|help]",
             "direct_cli": "claw mcp [list|show <server>|help]",
@@ -4091,9 +4122,17 @@ fn definition_source_id(source: DefinitionSource) -> &'static str {
 }
 
 fn definition_source_json(source: DefinitionSource) -> Value {
+    definition_source_json_with_detail(source, None)
+}
+
+fn definition_source_json_with_detail(
+    source: DefinitionSource,
+    detail_label: Option<&'static str>,
+) -> Value {
     json!({
         "id": definition_source_id(source),
         "label": source.label(),
+        "detail_label": detail_label,
     })
 }
 
@@ -4127,7 +4166,7 @@ fn skill_summary_json(skill: &SkillSummary) -> Value {
     json!({
         "name": &skill.name,
         "description": &skill.description,
-        "source": definition_source_json(skill.source),
+        "source": definition_source_json_with_detail(skill.source, skill.origin.detail_label()),
         "origin": skill_origin_json(skill.origin),
         "active": skill.shadowed_by.is_none(),
         "shadowed_by": skill.shadowed_by.map(definition_source_json),
@@ -4312,6 +4351,7 @@ pub fn handle_slash_command(
         | SlashCommand::OutputStyle { .. }
         | SlashCommand::AddDir { .. }
         | SlashCommand::History { .. }
+        | SlashCommand::Team { .. }
         | SlashCommand::Unknown(_) => None,
     }
 }
@@ -5293,6 +5333,7 @@ mod tests {
 
         assert_eq!(report["kind"], "agents");
         assert_eq!(report["action"], "list");
+        assert_eq!(report["status"], "ok");
         assert_eq!(report["working_directory"], workspace.display().to_string());
         assert_eq!(report["count"], 3);
         assert_eq!(report["summary"]["active"], 2);
@@ -5308,12 +5349,16 @@ mod tests {
         let help = handle_agents_slash_command_json(Some("help"), &workspace).expect("agents help");
         assert_eq!(help["kind"], "agents");
         assert_eq!(help["action"], "help");
+        assert_eq!(help["status"], "ok");
         assert_eq!(help["usage"]["direct_cli"], "claw agents [list|help]");
 
-        let unexpected = handle_agents_slash_command_json(Some("show planner"), &workspace)
-            .expect("agents usage");
-        assert_eq!(unexpected["action"], "help");
-        assert_eq!(unexpected["unexpected"], "show planner");
+        // Unknown agents subcommands now return Err so CLI layer can exit 1.
+        let unexpected_err = handle_agents_slash_command_json(Some("show planner"), &workspace);
+        assert!(unexpected_err.is_err());
+        assert!(unexpected_err
+            .unwrap_err()
+            .to_string()
+            .contains("show planner"));
 
         let _ = fs::remove_dir_all(workspace);
         let _ = fs::remove_dir_all(user_home);
@@ -5419,17 +5464,30 @@ mod tests {
         );
         assert_eq!(report["kind"], "skills");
         assert_eq!(report["action"], "list");
+        assert_eq!(report["status"], "ok");
         assert_eq!(report["summary"]["active"], 3);
         assert_eq!(report["summary"]["shadowed"], 1);
         assert_eq!(report["skills"][0]["name"], "plan");
         assert_eq!(report["skills"][0]["source"]["id"], "project_claw");
+        assert_eq!(report["skills"][0]["source"]["label"], "Project roots");
+        assert_eq!(
+            report["skills"][0]["source"]["detail_label"],
+            serde_json::Value::Null
+        );
         assert_eq!(report["skills"][1]["name"], "deploy");
+        assert_eq!(report["skills"][1]["source"]["id"], "project_claw");
+        assert_eq!(report["skills"][1]["source"]["label"], "Project roots");
+        assert_eq!(
+            report["skills"][1]["source"]["detail_label"],
+            "legacy /commands"
+        );
         assert_eq!(report["skills"][1]["origin"]["id"], "legacy_commands_dir");
         assert_eq!(report["skills"][3]["shadowed_by"]["id"], "project_claw");
 
         let help = handle_skills_slash_command_json(Some("help"), &workspace).expect("skills help");
         assert_eq!(help["kind"], "skills");
         assert_eq!(help["action"], "help");
+        assert_eq!(help["status"], "ok");
         assert_eq!(help["usage"]["aliases"][0], "/skill");
         assert_eq!(
             help["usage"]["direct_cli"],
@@ -5451,9 +5509,14 @@ mod tests {
         assert!(agents_help
             .contains("Sources          .claw/agents, ~/.claw/agents, $CLAW_CONFIG_HOME/agents"));
 
-        let agents_unexpected =
-            super::handle_agents_slash_command(Some("show planner"), &cwd).expect("agents usage");
-        assert!(agents_unexpected.contains("Unexpected       show planner"));
+        // Unknown agents subcommands now return Err (typed error) instead of Ok+help text
+        // so that the CLI layer can exit 1. The error message names the unexpected input.
+        let agents_unexpected_err = super::handle_agents_slash_command(Some("show planner"), &cwd);
+        assert!(agents_unexpected_err.is_err());
+        assert!(agents_unexpected_err
+            .unwrap_err()
+            .to_string()
+            .contains("show planner"));
 
         let skills_help =
             super::handle_skills_slash_command(Some("--help"), &cwd).expect("skills help");
@@ -5489,6 +5552,7 @@ mod tests {
         let sources = skills_help_json["usage"]["sources"]
             .as_array()
             .expect("skills help sources");
+        assert_eq!(skills_help_json["status"], "ok");
         assert_eq!(skills_help_json["usage"]["aliases"][0], "/skill");
         assert!(sources.iter().any(|value| value == ".omc/skills"));
         assert!(sources.iter().any(|value| value == ".agents/skills"));
@@ -5873,6 +5937,13 @@ mod tests {
         assert!(report.contains("Result           installed help"));
         assert!(report.contains("Invoke as        $help"));
         assert!(report.contains(&install_root.display().to_string()));
+
+        let json_report = super::render_skill_install_report_json(&installed);
+        assert_eq!(json_report["kind"], "skills");
+        assert_eq!(json_report["action"], "install");
+        assert_eq!(json_report["status"], "ok");
+        assert_eq!(json_report["invocation_name"], "help");
+        assert_eq!(json_report["invoke_as"], "$help");
 
         let roots = vec![SkillRoot {
             source: DefinitionSource::UserCodexHome,

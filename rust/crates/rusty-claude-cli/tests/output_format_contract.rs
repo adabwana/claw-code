@@ -16,6 +16,10 @@ fn help_emits_json_when_requested() {
 
     let parsed = assert_json_command(&root, &["--output-format", "json", "help"]);
     assert_eq!(parsed["kind"], "help");
+    assert_eq!(
+        parsed["status"], "ok",
+        "help JSON must have status:ok (#700)"
+    );
     assert!(parsed["message"]
         .as_str()
         .expect("help text")
@@ -29,6 +33,10 @@ fn export_help_emits_bounded_json_when_requested_384() {
 
     let parsed = assert_json_command(&root, &["export", "--help", "--output-format", "json"]);
     assert_eq!(parsed["kind"], "help");
+    assert_eq!(
+        parsed["status"], "ok",
+        "export help JSON must have status:ok (#700)"
+    );
     assert_eq!(parsed["topic"], "export");
     assert_eq!(parsed["command"], "export");
     assert_eq!(
@@ -194,13 +202,31 @@ fn inventory_commands_emit_structured_json_when_requested() {
     assert_eq!(plugins["action"], "list");
     assert_eq!(plugins["status"], "ok");
     assert!(plugins["config_load_error"].is_null());
+    // reload_runtime and target are operation-result fields; list response omits them (#703)
     assert!(
-        plugins["reload_runtime"].is_boolean(),
-        "plugins reload_runtime should be a boolean"
+        !plugins
+            .as_object()
+            .map_or(false, |o| o.contains_key("reload_runtime")),
+        "plugins list should not include reload_runtime"
     );
     assert!(
-        plugins["target"].is_null(),
-        "plugins target should be null when no plugin is targeted"
+        !plugins
+            .as_object()
+            .map_or(false, |o| o.contains_key("target")),
+        "plugins list should not include target"
+    );
+    // #703: structured summary replaces prose message
+    assert!(
+        plugins["summary"]["total"].is_number(),
+        "plugins list should have summary.total"
+    );
+    assert!(
+        plugins["summary"]["enabled"].is_number(),
+        "plugins list should have summary.enabled"
+    );
+    assert!(
+        plugins["summary"]["disabled"].is_number(),
+        "plugins list should have summary.disabled"
     );
     assert_eq!(plugins["status"], "ok");
     let plugin_entries = plugins["plugins"].as_array().expect("plugins array");
@@ -351,11 +377,90 @@ fn agents_command_emits_structured_agent_entries_when_requested() {
     assert_eq!(parsed["summary"]["shadowed"], 1);
     assert_eq!(parsed["agents"][0]["name"], "planner");
     assert_eq!(parsed["agents"][0]["source"]["id"], "project_claw");
+    assert_eq!(parsed["agents"][0]["source"]["label"], "Project roots");
+    assert_eq!(parsed["agents"][0]["source"]["detail_label"], Value::Null);
     assert_eq!(parsed["agents"][0]["active"], true);
     assert_eq!(parsed["agents"][1]["name"], "verifier");
     assert_eq!(parsed["agents"][2]["name"], "planner");
     assert_eq!(parsed["agents"][2]["active"], false);
     assert_eq!(parsed["agents"][2]["shadowed_by"]["id"], "project_claw");
+}
+
+#[test]
+fn agents_and_skills_inventory_share_source_schema_702() {
+    let root = unique_temp_dir("inventory-source-schema-702");
+    let workspace = root.join("workspace");
+    let project_agents = workspace.join(".codex").join("agents");
+    let project_skills = workspace.join(".codex").join("skills");
+    let legacy_commands = workspace.join(".claude").join("commands");
+    let home = root.join("home");
+    let isolated_config = root.join("config-home");
+    let isolated_codex = root.join("codex-home");
+    fs::create_dir_all(&workspace).expect("workspace should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+
+    write_agent(
+        &project_agents,
+        "planner",
+        "Project planner",
+        "gpt-5.4",
+        "medium",
+    );
+    write_skill(&project_skills, "plan", "Project planning guidance");
+    write_legacy_command(&legacy_commands, "deploy", "Legacy deployment guidance");
+
+    let envs = [
+        ("HOME", home.to_str().expect("utf8 home")),
+        (
+            "CLAW_CONFIG_HOME",
+            isolated_config.to_str().expect("utf8 config home"),
+        ),
+        (
+            "CODEX_HOME",
+            isolated_codex.to_str().expect("utf8 codex home"),
+        ),
+    ];
+    let agents =
+        assert_json_command_with_env(&workspace, &["--output-format", "json", "agents"], &envs);
+    let skills =
+        assert_json_command_with_env(&workspace, &["--output-format", "json", "skills"], &envs);
+
+    let agent_source = &agents["agents"][0]["source"];
+    let skill_source = &skills["skills"][0]["source"];
+    for source in [agent_source, skill_source] {
+        assert!(
+            source.get("id").is_some(),
+            "inventory source must expose id: {source}"
+        );
+        assert!(
+            source.get("label").is_some(),
+            "inventory source must expose label: {source}"
+        );
+        assert!(
+            source.get("detail_label").is_some(),
+            "inventory source must expose detail_label for a stable cross-resource path: {source}"
+        );
+    }
+    assert_eq!(agent_source["id"], "project_claw");
+    assert_eq!(agent_source["label"], "Project roots");
+    assert_eq!(agent_source["detail_label"], Value::Null);
+    assert_eq!(skill_source["id"], "project_claw");
+    assert_eq!(skill_source["label"], "Project roots");
+    assert_eq!(skill_source["detail_label"], Value::Null);
+
+    let legacy_skill = skills["skills"]
+        .as_array()
+        .expect("skills array")
+        .iter()
+        .find(|skill| skill["name"] == "deploy")
+        .expect("legacy command skill should be listed");
+    assert_eq!(legacy_skill["source"]["id"], "project_claw");
+    assert_eq!(legacy_skill["source"]["label"], "Project roots");
+    assert_eq!(legacy_skill["source"]["detail_label"], "legacy /commands");
+    assert_eq!(
+        legacy_skill["origin"]["id"], "legacy_commands_dir",
+        "legacy origin stays for compatibility while generic parsers use source"
+    );
 }
 
 #[test]
@@ -365,6 +470,10 @@ fn bootstrap_and_system_prompt_emit_json_when_requested() {
 
     let plan = assert_json_command(&root, &["--output-format", "json", "bootstrap-plan"]);
     assert_eq!(plan["kind"], "bootstrap-plan");
+    assert_eq!(
+        plan["status"], "ok",
+        "bootstrap-plan JSON must have status:ok (#458)"
+    );
     assert!(plan["phases"].as_array().expect("phases").len() > 1);
 
     let prompt = assert_json_command(&root, &["--output-format", "json", "system-prompt"]);
@@ -427,6 +536,12 @@ fn doctor_and_resume_status_emit_json_when_requested() {
             assert!(check["status"].as_str().is_some());
             assert!(check["summary"].as_str().is_some());
             assert!(check["details"].is_array());
+            // #704: each check must have a stable snake_case id
+            assert!(
+                check["id"].as_str().is_some(),
+                "doctor check missing stable id field: {:?}",
+                check["name"]
+            );
             check["name"].as_str().expect("doctor check name")
         })
         .collect::<Vec<_>>();
@@ -600,13 +715,22 @@ fn resumed_inventory_commands_emit_structured_json_when_requested() {
     assert_eq!(plugins["action"], "list");
     assert_eq!(plugins["status"], "ok");
     assert!(plugins["config_load_error"].is_null());
+    // reload_runtime and target are operation-result fields; list response omits them (#703)
     assert!(
-        plugins["reload_runtime"].is_boolean(),
-        "plugins reload_runtime should be a boolean"
+        !plugins
+            .as_object()
+            .map_or(false, |o| o.contains_key("reload_runtime")),
+        "plugins list should not include reload_runtime"
     );
     assert!(
-        plugins["target"].is_null(),
-        "plugins target should be null when no plugin is targeted"
+        !plugins
+            .as_object()
+            .map_or(false, |o| o.contains_key("target")),
+        "plugins list should not include target"
+    );
+    assert!(
+        plugins["summary"]["total"].is_number(),
+        "plugins list should have summary.total"
     );
 }
 
@@ -893,6 +1017,25 @@ fn write_agent(root: &Path, name: &str, description: &str, model: &str, reasonin
     .expect("agent fixture should write");
 }
 
+fn write_skill(root: &Path, name: &str, description: &str) {
+    let skill_root = root.join(name);
+    fs::create_dir_all(&skill_root).expect("skill root should exist");
+    fs::write(
+        skill_root.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
+    )
+    .expect("skill fixture should write");
+}
+
+fn write_legacy_command(root: &Path, name: &str, description: &str) {
+    fs::create_dir_all(root).expect("legacy command root should exist");
+    fs::write(
+        root.join(format!("{name}.md")),
+        format!("---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n"),
+    )
+    .expect("legacy command fixture should write");
+}
+
 fn unique_temp_dir(label: &str) -> PathBuf {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -903,4 +1046,88 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         "claw-output-format-{label}-{}-{millis}-{counter}",
         std::process::id()
     ))
+}
+
+#[test]
+fn diff_json_has_status_and_result_field_702() {
+    // #458/#702: `claw diff --output-format json` must have status ∈ {ok,error}
+    // and a `result` field to distinguish clean/changes/no-repo states.
+    let root = unique_temp_dir("diff-json-status");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    // In a non-git directory, diff should report status:ok + result:no_git_repo
+    // or status:error; in a git repo it should report ok + result:clean|changes.
+    // We only assert the shape, not the value, to avoid flakiness.
+    let parsed = assert_json_command(&root, &["--output-format", "json", "diff"]);
+    assert_eq!(
+        parsed["kind"], "diff",
+        "diff JSON must have kind:diff (#458)"
+    );
+    let status = parsed["status"]
+        .as_str()
+        .expect("diff JSON must have status field (#458/#702)");
+    assert!(
+        matches!(status, "ok" | "error"),
+        "diff status must be ok or error, got {status:?}"
+    );
+    assert!(
+        parsed.get("result").is_some(),
+        "diff JSON must have result field"
+    );
+}
+
+#[test]
+fn export_json_has_kind_702() {
+    // #458/#702: `claw export --output-format json` must emit kind:export.
+    // We check only the kind field to avoid flakiness from session-store state.
+    // A success path with an actual session would also carry status:ok.
+    let root = unique_temp_dir("export-json-kind");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    // Run without asserting exit code — may fail with no sessions or legacy sessions.
+    use std::process::Command;
+    let bin = env!("CARGO_BIN_EXE_claw");
+    let output = Command::new(bin)
+        .current_dir(&root)
+        .args(["--output-format", "json", "export"])
+        .env("ANTHROPIC_API_KEY", "test")
+        .output()
+        .expect("claw binary should run");
+
+    // On success stdout has kind:export; on failure stderr has type:error.
+    // Either way, both envelopes must be valid JSON.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .collect::<Vec<_>>()
+        .join("");
+
+    if output.status.success() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("export success stdout must be valid JSON");
+        assert_eq!(
+            parsed["kind"], "export",
+            "export JSON must have kind:export (#458)"
+        );
+        let status = parsed["status"]
+            .as_str()
+            .expect("export JSON must have status");
+        assert!(
+            matches!(status, "ok" | "error"),
+            "export status must be ok or error"
+        );
+    } else {
+        // Error envelope on stderr must be parseable JSON.
+        assert!(
+            !stderr.is_empty(),
+            "export failure must emit JSON to stderr"
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stderr).expect("export error stderr must be valid JSON");
+        assert_eq!(
+            parsed["type"], "error",
+            "export error envelope must have type:error"
+        );
+    }
 }
