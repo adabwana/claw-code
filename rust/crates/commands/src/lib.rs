@@ -2365,6 +2365,13 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
         }
         Some(args) if args.starts_with("list ") => {
             let filter = args["list ".len()..].trim().to_lowercase();
+            // #803: reject flag-shaped tokens in text mode too (JSON guard was added in #792)
+            if filter.starts_with('-') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unknown option for `agents list`: {filter}\nUsage: claw agents list [<filter>]\nFilters are name substrings, not flags."),
+                ));
+            }
             let roots = discover_definition_roots(cwd, "agents");
             let agents = load_agents_from_roots(&roots)?;
             let filtered: Vec<_> = agents
@@ -2383,22 +2390,30 @@ pub fn handle_agents_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
                 || args.starts_with("info ")
                 || args.starts_with("describe ") =>
         {
-            let name = args
+            let name_raw = args
                 .split_once(' ')
                 .map(|(_, name)| name)
                 .unwrap_or_default()
                 .trim()
                 .to_lowercase();
+            // #804: detect extra positional args (parity with JSON-mode fix #796)
+            if name_raw.contains(' ') {
+                let extra = name_raw.split_once(' ').map(|(_, e)| e).unwrap_or("");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unexpected extra arguments after agent name\nUsage: claw agents show <name>\nUnexpected extra: '{extra}'"),
+                ));
+            }
             let roots = discover_definition_roots(cwd, "agents");
             let agents = load_agents_from_roots(&roots)?;
             let matched: Vec<_> = agents
                 .into_iter()
-                .filter(|a| a.name.to_lowercase() == name)
+                .filter(|a| a.name.to_lowercase() == name_raw)
                 .collect();
             if matched.is_empty() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
-                    format!("agent not found: {name}"),
+                    format!("agent not found: {name_raw}"),
                 ));
             }
             Ok(render_agents_report(&matched))
@@ -2429,6 +2444,18 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
         }
         Some(args) if args.starts_with("list ") => {
             let filter = args["list ".len()..].trim().to_lowercase();
+            // #792: unknown flags (--something) silently became filter strings, returning
+            // empty success list instead of an error. Detect and reject flag-shaped tokens.
+            if filter.starts_with('-') {
+                return Ok(serde_json::json!({
+                    "kind": "agents",
+                    "action": "list",
+                    "status": "error",
+                    "error_kind": "unknown_option",
+                    "unexpected": filter,
+                    "hint": "Usage: claw agents list [<filter>]\nFilters are name substrings, not flags.",
+                }));
+            }
             let roots = discover_definition_roots(cwd, "agents");
             let agents = load_agents_from_roots(&roots)?;
             let filtered: Vec<_> = agents
@@ -2447,12 +2474,29 @@ pub fn handle_agents_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                 || args.starts_with("info ")
                 || args.starts_with("describe ") =>
         {
-            let name = args
+            let name_raw = args
                 .split_once(' ')
                 .map(|(_, name)| name)
                 .unwrap_or_default()
                 .trim()
                 .to_lowercase();
+            // #796: extra positional args after the name (e.g. `agents show foo extra`)
+            // produced a confusing agent_not_found for "foo extra" instead of flagging
+            // the unexpected extra argument.
+            let (name, extra) = name_raw
+                .split_once(' ')
+                .map(|(n, e)| (n.to_string(), Some(e.to_string())))
+                .unwrap_or_else(|| (name_raw.clone(), None));
+            if let Some(extra_token) = extra {
+                return Ok(serde_json::json!({
+                    "kind": "agents",
+                    "action": "show",
+                    "status": "error",
+                    "error_kind": "unexpected_extra_args",
+                    "unexpected": extra_token,
+                    "hint": format!("Usage: claw agents show <name>\nUnexpected extra: '{extra_token}'"),
+                }));
+            }
             let roots = discover_definition_roots(cwd, "agents");
             let agents = load_agents_from_roots(&roots)?;
             let matched: Vec<_> = agents
@@ -2517,6 +2561,13 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
         }
         Some(args) if args.starts_with("list ") => {
             let filter = args["list ".len()..].trim().to_lowercase();
+            // #803: reject flag-shaped tokens in text mode too (JSON guard was added in #792)
+            if filter.starts_with('-') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unknown option for `skills list`: {filter}\nUsage: claw skills list [<filter>]\nFilters are name substrings, not flags."),
+                ));
+            }
             let roots = discover_skill_roots(cwd);
             let skills = load_skills_from_roots(&roots)?;
             let filtered: Vec<_> = skills
@@ -2535,18 +2586,33 @@ pub fn handle_skills_slash_command(args: Option<&str>, cwd: &Path) -> std::io::R
                 || args.starts_with("info ")
                 || args.starts_with("describe ") =>
         {
-            let name = args
+            let name_raw = args
                 .split_once(' ')
                 .map(|(_, name)| name)
                 .unwrap_or_default()
                 .trim()
                 .to_lowercase();
+            // #804: detect extra positional args (parity with JSON-mode fix #796)
+            if name_raw.contains(' ') {
+                let extra = name_raw.split_once(' ').map(|(_, e)| e).unwrap_or("");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unexpected extra arguments after skill name\nUsage: claw skills show <name>\nUnexpected extra: '{extra}'"),
+                ));
+            }
             let roots = discover_skill_roots(cwd);
             let skills = load_skills_from_roots(&roots)?;
             let matched: Vec<_> = skills
                 .into_iter()
-                .filter(|s| s.name.to_lowercase() == name)
+                .filter(|s| s.name.to_lowercase() == name_raw)
                 .collect();
+            // #805: text-mode show must return an error when skill not found (parity with JSON)
+            if matched.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("skill '{name_raw}' not found\nRun `claw skills list` to see available skills."),
+                ));
+            }
             Ok(render_skills_report(&matched))
         }
         Some("install") => Ok(render_skills_usage(Some("install"))),
@@ -2582,6 +2648,18 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
         }
         Some(args) if args.starts_with("list ") => {
             let filter = args["list ".len()..].trim().to_lowercase();
+            // #792: flag-shaped tokens silently became filter strings, returning
+            // empty success list instead of an error. Detect and reject them.
+            if filter.starts_with('-') {
+                return Ok(serde_json::json!({
+                    "kind": "skills",
+                    "action": "list",
+                    "status": "error",
+                    "error_kind": "unknown_option",
+                    "unexpected": filter,
+                    "hint": "Usage: claw skills list [<filter>]\nFilters are name substrings, not flags.",
+                }));
+            }
             let roots = discover_skill_roots(cwd);
             let skills = load_skills_from_roots(&roots)?;
             let filtered: Vec<_> = skills
@@ -2600,12 +2678,29 @@ pub fn handle_skills_slash_command_json(args: Option<&str>, cwd: &Path) -> std::
                 || args.starts_with("info ")
                 || args.starts_with("describe ") =>
         {
-            let name = args
+            let name_raw = args
                 .split_once(' ')
                 .map(|(_, name)| name)
                 .unwrap_or_default()
                 .trim()
                 .to_lowercase();
+            // #796: extra positional args after the name (e.g. `skills show foo extra`)
+            // produced a confusing skill_not_found for "foo extra" instead of flagging
+            // the unexpected extra argument.
+            let (name, extra) = name_raw
+                .split_once(' ')
+                .map(|(n, e)| (n.to_string(), Some(e.to_string())))
+                .unwrap_or_else(|| (name_raw.clone(), None));
+            if let Some(extra_token) = extra {
+                return Ok(json!({
+                    "kind": "skills",
+                    "action": "show",
+                    "status": "error",
+                    "error_kind": "unexpected_extra_args",
+                    "unexpected": extra_token,
+                    "hint": format!("Usage: claw skills show <name>\nUnexpected extra: '{extra_token}'"),
+                }));
+            }
             let roots = discover_skill_roots(cwd);
             let skills = load_skills_from_roots(&roots)?;
             let matched: Vec<_> = skills

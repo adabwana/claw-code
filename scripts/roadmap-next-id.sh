@@ -17,7 +17,31 @@
 # and resolve any append collision at git-push time.
 set -euo pipefail
 
-ROADMAP="${1:-ROADMAP.md}"
+ROADMAP="ROADMAP.md"
+ROADMAP_PATH_SEEN=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --help|-h)
+      sed -n '2,15p' "$0" | sed 's/^# //; s/^#//'
+      exit 0
+      ;;
+    --*)
+      echo "error: unknown option: $1" >&2
+      exit 2
+      ;;
+    *)
+      if [[ "$ROADMAP_PATH_SEEN" -ne 0 ]]; then
+        echo "error: unexpected extra ROADMAP path: $1" >&2
+        exit 2
+      fi
+      ROADMAP="$1"
+      ROADMAP_PATH_SEEN=1
+      shift
+      ;;
+  esac
+done
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CHECKER="$SCRIPT_DIR/roadmap-check-ids.sh"
 

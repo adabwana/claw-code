@@ -335,8 +335,11 @@ fn classify_error_kind(message: &str) -> &'static str {
         "unknown_agents_subcommand"
     } else if message.starts_with("agent not found:") {
         "agent_not_found"
-    } else if message.contains("is not installed") {
+    } else if message.contains("is not installed") || message.starts_with("plugin_not_found:") {
         "plugin_not_found"
+    } else if message.contains("plugin source") && message.contains("was not found") {
+        // #794: `plugins install /nonexistent/path` → "plugin source ... was not found"
+        "plugin_source_not_found"
     } else if (message.contains("skill source") && message.contains("not found"))
         || message.starts_with("skill '")
     {
@@ -410,6 +413,21 @@ fn fallback_hint_for_error_kind(kind: &str) -> Option<&'static str> {
         ),
         "session_path_is_directory" => Some(
             "--resume expects a .jsonl session file path, not a directory. Run `claw --output-format json /session list` to list managed sessions.",
+        ),
+        // #793: plugins uninstall/enable/disable of non-existing plugin propagates through
+        // the ? operator with no \n delimiter, so split_error_hint returns None.
+        "plugin_not_found" => Some("Run `claw plugins list` to see installed plugins."),
+        // #794: plugins install with a path that doesn't exist
+        "plugin_source_not_found" => Some(
+            "Check that the path or URL is correct. Use a local directory or a valid registry id.",
+        ),
+        // #795: skills install/show of a non-existing skill path or name
+        "skill_not_found" => Some(
+            "Run `claw skills list` to see available skills, or `claw skills install <path>` to install a new one.",
+        ),
+        // #795: unsupported action on skills (e.g. /skills uninstall) with no \n hint
+        "unsupported_skills_action" => Some(
+            "Supported: list, install <path>, show <name>, help. Run `claw skills help` for details.",
         ),
         _ => None,
     }
@@ -1170,8 +1188,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             let action = tail.first().cloned();
             let target = tail.get(1).cloned();
             if tail.len() > 2 {
+                // #797: append \n usage hint so split_error_hint extracts it (parity with #791 config fix)
                 return Err(format!(
-                    "unexpected extra arguments after `claw {} {}`: {}",
+                    "unexpected extra arguments after `claw {} {}`: {}\nUsage: claw plugins [list|show <id>|install <id>|enable <id>|disable <id>|uninstall <id>|update <id>|help]",
                     rest[0],
                     tail[..2].join(" "),
                     tail[2..].join(" ")
@@ -1193,8 +1212,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             let tail = &rest[1..];
             let section = tail.first().cloned();
             if tail.len() > 1 {
+                // #791: append \n hint so split_error_hint extracts it and hint is non-null
                 return Err(format!(
-                    "unexpected extra arguments after `claw config {}`: {}",
+                    "unexpected extra arguments after `claw config {}`: {}\nUsage: claw config [env|hooks|model|plugins|mcp|settings]",
                     tail[0],
                     tail[1..].join(" ")
                 ));
@@ -1208,10 +1228,10 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         // `git diff`). No session needed to inspect the working tree.
         "diff" => {
             if rest.len() > 1 {
-                return Err(format!(
-                    "unexpected extra arguments after `claw diff`: {}\nUsage: claw diff",
-                    rest[1..].join(" ")
-                ));
+                // #3129: keep malformed `diff ... --output-format json` on the
+                // parser/error path, not the prompt/TUI fallback. The newline
+                // before Usage is part of the JSON hint contract.
+                return Err(unexpected_diff_args_error(&rest[1..]));
             }
             Ok(CliAction::Diff { output_format })
         }
@@ -1361,8 +1381,9 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             // an empty prompt when credentials are present).
             let joined = rest.join(" ");
             if joined.trim().is_empty() {
+                // #798: add \n hint so split_error_hint extracts it (was empty_prompt + null)
                 return Err(
-                    "empty prompt: provide a subcommand (run `claw --help`) or a non-empty prompt string"
+                    "empty prompt: provide a subcommand or a non-empty prompt string.\nUsage: claw <subcommand> or claw -p <prompt>. Run `claw --help` for the full list."
                         .to_string(),
                 );
             }
@@ -1604,6 +1625,13 @@ fn removed_auth_surface_error(command_name: &str) -> String {
     // #765: two-line format so split_error_hint() extracts hint into JSON envelope
     format!(
         "`claw {command_name}` has been removed.\nSet ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN instead."
+    )
+}
+
+fn unexpected_diff_args_error(extra: &[String]) -> String {
+    format!(
+        "unexpected extra arguments after `claw diff`: {}\nUsage: claw diff",
+        extra.join(" ")
     )
 }
 
@@ -2094,11 +2122,16 @@ fn parse_system_prompt_args(
             }
             other => {
                 // #152: hint `--output-format json` when user types `--json`.
-                let mut msg = format!("unknown system-prompt option: {other}");
-                if other == "--json" {
-                    msg.push_str("\nDid you mean `--output-format json`?");
-                }
-                return Err(msg);
+                // #790: use unknown_option: prefix + \n hint so classify_error_kind returns
+                // unknown_option and split_error_hint extracts the remediation text.
+                let hint = if other == "--json" {
+                    "Did you mean `--output-format json`? Usage: claw system-prompt [--cwd <dir>] [--date <YYYY-MM-DD>] [--output-format text|json]".to_string()
+                } else {
+                    "Usage: claw system-prompt [--cwd <dir>] [--date <YYYY-MM-DD>] [--output-format text|json]".to_string()
+                };
+                return Err(format!(
+                    "unknown_option: unknown system-prompt option: {other}.\n{hint}"
+                ));
             }
         }
     }
@@ -3410,6 +3443,7 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                             "status": "error",
                             "error_kind": "unsupported_command",
                             "error": format!("/{cmd_root} is not yet implemented in this build"),
+                            "hint": "This command is not available in the current build. Update claw or use a different command.",
                             "exit_code": 2,
                             "command": raw_command,
                         })
@@ -3432,6 +3466,7 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                             "status": "error",
                             "error_kind": "unsupported_resumed_command",
                             "error": format!("unsupported resumed command: {raw_command}"),
+                            "hint": "This command cannot be used with --resume. Use it in an interactive REPL session instead.",
                             "exit_code": 2,
                             "command": raw_command,
                         })
@@ -3451,6 +3486,7 @@ fn resume_session(session_path: &Path, commands: &[String], output_format: CliOu
                             "status": "error",
                             "error_kind": "cli_parse",
                             "error": error.to_string(),
+                            "hint": "Run `claw --help` for usage.",
                             "exit_code": 2,
                             "command": raw_command,
                         })
@@ -4815,6 +4851,7 @@ fn enforce_broad_cwd_policy(
                         "status": "error",
                         "error_kind": "broad_cwd",
                         "error": message,
+                        "hint": "Change to a more specific project directory, or use --cwd to set the workspace root.",
                         "exit_code": 1,
                     })
                 );
@@ -6359,9 +6396,41 @@ impl LiveCli {
         output_format: CliOutputFormat,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
+        // #803: reject flag-shaped tokens in list filter for BOTH text and JSON modes.
+        // Previously the guard was JSON-only (#793); text mode silently returned empty success.
+        if action.as_deref() == Some("list") {
+            if let Some(filter) = target.as_deref() {
+                if filter.starts_with('-') {
+                    return Err(format!(
+                        "unknown option for `claw plugins list`: {filter}\nUsage: claw plugins list [<filter>]\nFilters are id substrings, not flags."
+                    ).into());
+                }
+            }
+        }
         let payload = plugins_command_payload_for(&cwd, action, target)?;
         match output_format {
-            CliOutputFormat::Text => println!("{}", payload.message),
+            CliOutputFormat::Text => {
+                // #806: text-mode show must return error when plugin not found (parity with JSON)
+                let action_str = action.unwrap_or("list");
+                if matches!(action_str, "show" | "info" | "describe") {
+                    if let Some(name) = target {
+                        let needle = name.to_lowercase();
+                        let found = payload.plugins.iter().any(|p| {
+                            p.get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|id| id.to_lowercase() == needle)
+                                .unwrap_or(false)
+                        });
+                        if !found {
+                            return Err(format!(
+                                "plugin_not_found: plugin '{}' not found\nRun `claw plugins list` to see available plugins.",
+                                name
+                            ).into());
+                        }
+                    }
+                }
+                println!("{}", payload.message);
+            }
             CliOutputFormat::Json => {
                 let action_str = action.unwrap_or("list");
                 // #743/#420: plugins help must return a usage envelope matching agents/mcp/skills help shape.
@@ -6404,6 +6473,20 @@ impl LiveCli {
                     }
                 } else if is_list_action {
                     if let Some(filter) = target {
+                        // #793: flag-shaped tokens silently became substring filters on
+                        // plugins list, returning empty success instead of an error.
+                        if filter.starts_with('-') {
+                            let obj = json!({
+                                "kind": "plugin",
+                                "action": "list",
+                                "status": "error",
+                                "error_kind": "unknown_option",
+                                "unexpected": filter,
+                                "hint": "Usage: claw plugins list [<filter>]\nFilters are id substrings, not flags.",
+                            });
+                            println!("{}", serde_json::to_string_pretty(&obj)?);
+                            std::process::exit(1);
+                        }
                         let needle = filter.to_lowercase();
                         payload
                             .plugins
@@ -8294,11 +8377,15 @@ fn render_diff_json_for(cwd: &Path) -> Result<serde_json::Value, Box<dyn std::er
         .map(|o| o.status.success())
         .unwrap_or(false);
     if !in_git_repo {
+        // #801: add error_kind, hint, message fields for envelope parity with other error paths
         return Ok(serde_json::json!({
             "kind": "diff",
             "action": "diff",
             "status": "error",
+            "error_kind": "no_git_repo",
             "result": "no_git_repo",
+            "message": format!("{} is not inside a git project", cwd.display()),
+            "hint": "Run `git init` to create a repository, or change to a directory that is inside a git project.",
             "working_directory": cwd.display().to_string(),
             "detail": format!("{} is not inside a git project", cwd.display()),
         }));
@@ -13158,6 +13245,11 @@ mod tests {
             classify_error_kind("my-plugin is not installed"),
             "plugin_not_found"
         );
+        // #794: plugins install with missing source path
+        assert_eq!(
+            classify_error_kind("plugin source `/nonexistent/path` was not found"),
+            "plugin_source_not_found"
+        );
         assert_eq!(
             classify_error_kind("skill source /path/to/skill not found"),
             "skill_not_found"
@@ -13216,6 +13308,20 @@ mod tests {
                 "invalid_resume_argument: `compact` is not a slash command.\nUsage: claw --resume <session-id|latest> /<slash-command>"
             ),
             "invalid_resume_argument"
+        );
+        // coverage: invalid_history_count arm
+        assert_eq!(
+            classify_error_kind("invalid_history_count: abc is not a valid count"),
+            "invalid_history_count"
+        );
+        assert_eq!(
+            classify_error_kind("something invalid count something"),
+            "invalid_history_count"
+        );
+        // coverage: unknown_option arm (#790)
+        assert_eq!(
+            classify_error_kind("unknown_option: unknown system-prompt option: --foo."),
+            "unknown_option"
         );
     }
 
