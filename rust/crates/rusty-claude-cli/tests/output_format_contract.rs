@@ -73,6 +73,10 @@ fn version_emits_json_when_requested() {
 
     let parsed = assert_json_command(&root, &["--output-format", "json", "version"]);
     assert_eq!(parsed["kind"], "version");
+    assert_eq!(
+        parsed["action"], "show",
+        "version JSON must have action:show (#711)"
+    );
     assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
     // Provenance fields must be present for binary identification (#507).
     assert!(
@@ -183,6 +187,80 @@ fn inventory_commands_emit_structured_json_when_requested() {
     assert_eq!(agents["count"], 0);
     assert_eq!(agents["summary"]["active"], 0);
     assert!(agents["agents"]
+        .as_array()
+        .expect("agents array")
+        .is_empty());
+
+    // #717: agents show <name> and agents list <filter> should be valid subcommands
+    let agents_show_env = [
+        ("HOME", isolated_home.to_str().expect("utf8 home")),
+        (
+            "CLAW_CONFIG_HOME",
+            isolated_config.to_str().expect("utf8 config home"),
+        ),
+        (
+            "CODEX_HOME",
+            isolated_codex.to_str().expect("utf8 codex home"),
+        ),
+    ];
+    // #789: agents show not-found now exits 1 (parity with skills #788);
+    // use run_claw directly instead of assert_json_command_with_env which checks success.
+    let agents_show_out = run_claw(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "agents",
+            "show",
+            "nonexistent-xyz",
+        ],
+        &agents_show_env,
+    );
+    assert!(
+        !agents_show_out.status.success(),
+        "agents show not-found must exit non-zero"
+    );
+    let agents_show_missing: serde_json::Value =
+        serde_json::from_slice(&agents_show_out.stdout).expect("agents show stdout should be json");
+    assert_eq!(agents_show_missing["kind"], "agents", "agents show kind");
+    assert_eq!(agents_show_missing["action"], "show", "agents show action");
+    assert_eq!(
+        agents_show_missing["status"], "error",
+        "agents show not-found status"
+    );
+    assert_eq!(
+        agents_show_missing["error_kind"], "agent_not_found",
+        "agents show error_kind"
+    );
+    assert_eq!(
+        agents_show_missing["requested"], "nonexistent-xyz",
+        "agents show requested"
+    );
+
+    let agents_list_filtered = assert_json_command_with_env(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "agents",
+            "list",
+            "nonexistent-filter-xyz",
+        ],
+        &agents_show_env,
+    );
+    assert_eq!(
+        agents_list_filtered["kind"], "agents",
+        "agents list filter kind"
+    );
+    assert_eq!(
+        agents_list_filtered["action"], "list",
+        "agents list filter action"
+    );
+    assert_eq!(
+        agents_list_filtered["status"], "ok",
+        "agents list filter status"
+    );
+    assert!(agents_list_filtered["agents"]
         .as_array()
         .expect("agents array")
         .is_empty());
@@ -478,6 +556,10 @@ fn bootstrap_and_system_prompt_emit_json_when_requested() {
 
     let prompt = assert_json_command(&root, &["--output-format", "json", "system-prompt"]);
     assert_eq!(prompt["kind"], "system-prompt");
+    assert_eq!(
+        prompt["action"], "show",
+        "system-prompt JSON must have action:show (#711)"
+    );
     assert!(prompt["message"]
         .as_str()
         .expect("prompt text")
@@ -508,6 +590,10 @@ fn dump_manifests_and_init_emit_json_when_requested() {
     fs::create_dir_all(&workspace).expect("workspace should exist");
     let init = assert_json_command(&workspace, &["--output-format", "json", "init"]);
     assert_eq!(init["kind"], "init");
+    assert_eq!(
+        init["action"], "init",
+        "init JSON must have action:init (#711)"
+    );
     assert!(workspace.join("CLAUDE.md").exists());
 }
 
@@ -585,6 +671,22 @@ fn doctor_and_resume_status_emit_json_when_requested() {
     assert!(boot_preflight["boot_preflight"]["repo"]["exists"].is_boolean());
     assert!(boot_preflight["boot_preflight"]["mcp_startup"]["eligible"].is_boolean());
     assert!(boot_preflight["boot_preflight"]["required_binaries"].is_array());
+    // #736: details[] must be {key,value} objects with non-null values;
+    // regression guard for the double-space separator fix on boot_preflight prose strings.
+    let bp_details = boot_preflight["details"]
+        .as_array()
+        .expect("boot_preflight details must be array");
+    for entry in bp_details {
+        assert!(
+            entry["key"].is_string(),
+            "boot_preflight detail entry missing string key: {entry:?}"
+        );
+        assert!(
+            !entry["value"].is_null(),
+            "boot_preflight detail entry has null value (prose-splitter failed): key={:?}",
+            entry["key"]
+        );
+    }
 
     let sandbox = checks
         .iter()
@@ -941,6 +1043,164 @@ fn mcp_degraded_config_and_failed_usage_are_distinct_json_contracts() {
     assert!(failed.get("config_load_error").is_none());
 }
 
+#[test]
+fn local_json_surfaces_have_non_empty_action_contract_714() {
+    let root = unique_temp_dir("json-action-sweep-714");
+    let workspace = root.join("workspace");
+    let init_workspace = root.join("init-workspace");
+    let git_workspace = root.join("git-workspace");
+    let home = root.join("home");
+    let config_home = root.join("config-home");
+    let codex_home = root.join("codex-home");
+    fs::create_dir_all(&workspace).expect("workspace should exist");
+    fs::create_dir_all(&init_workspace).expect("init workspace should exist");
+    fs::create_dir_all(&git_workspace).expect("git workspace should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&codex_home).expect("codex home should exist");
+
+    let session_path = write_session_fixture(&workspace, "action-sweep-export", Some("export me"));
+    let export_output = root.join("export.md");
+    let upstream = write_upstream_fixture(&root);
+    let git_init = Command::new("git")
+        .arg("init")
+        .current_dir(&git_workspace)
+        .output()
+        .expect("git init should launch");
+    assert!(
+        git_init.status.success(),
+        "git init stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&git_init.stdout),
+        String::from_utf8_lossy(&git_init.stderr)
+    );
+
+    let envs = [
+        ("HOME", home.to_str().expect("home utf8")),
+        (
+            "CLAW_CONFIG_HOME",
+            config_home.to_str().expect("config utf8"),
+        ),
+        ("CODEX_HOME", codex_home.to_str().expect("codex utf8")),
+    ];
+
+    let surfaces: Vec<(&Path, Vec<String>)> = vec![
+        (&workspace, strings(&["--output-format", "json", "help"])),
+        (&workspace, strings(&["--output-format", "json", "version"])),
+        (&workspace, strings(&["--output-format", "json", "doctor"])),
+        (&workspace, strings(&["--output-format", "json", "status"])),
+        (&workspace, strings(&["--output-format", "json", "sandbox"])),
+        (
+            &workspace,
+            strings(&["--output-format", "json", "bootstrap-plan"]),
+        ),
+        (
+            &workspace,
+            strings(&["--output-format", "json", "system-prompt"]),
+        ),
+        (
+            &workspace,
+            vec![
+                "--output-format".into(),
+                "json".into(),
+                "dump-manifests".into(),
+                "--manifests-dir".into(),
+                upstream.to_str().expect("upstream utf8").into(),
+            ],
+        ),
+        (
+            &workspace,
+            vec![
+                "--output-format".into(),
+                "json".into(),
+                "export".into(),
+                "--session".into(),
+                session_path.to_str().expect("session utf8").into(),
+            ],
+        ),
+        (
+            &workspace,
+            vec![
+                "--output-format".into(),
+                "json".into(),
+                "export".into(),
+                "--session".into(),
+                session_path.to_str().expect("session utf8").into(),
+                "--output".into(),
+                export_output.to_str().expect("export output utf8").into(),
+            ],
+        ),
+        (
+            &init_workspace,
+            strings(&["--output-format", "json", "init"]),
+        ),
+        (&workspace, strings(&["--output-format", "json", "diff"])),
+        (
+            &git_workspace,
+            strings(&["--output-format", "json", "diff"]),
+        ),
+        (&workspace, strings(&["--output-format", "json", "acp"])),
+        (&workspace, strings(&["--output-format", "json", "config"])),
+        (
+            &workspace,
+            strings(&["--output-format", "json", "config", "model"]),
+        ),
+        (
+            &workspace,
+            strings(&["--output-format", "json", "config", "unknown"]),
+        ),
+        (&workspace, strings(&["--output-format", "json", "skills"])),
+        (&workspace, strings(&["--output-format", "json", "agents"])),
+        (&workspace, strings(&["--output-format", "json", "plugins"])),
+        (&workspace, strings(&["--output-format", "json", "mcp"])),
+    ];
+
+    for (current_dir, args) in surfaces {
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let parsed = assert_json_command_with_env(current_dir, &arg_refs, &envs);
+        assert_non_empty_action(&parsed, &arg_refs);
+    }
+}
+
+#[test]
+fn inventory_commands_deduplicate_config_deprecation_warnings_per_process() {
+    let root = unique_temp_dir("config-warning-dedup");
+    let config_home = root.join("config-home");
+    let home = root.join("home");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+    fs::write(
+        config_home.join("settings.json"),
+        r#"{"enabledPlugins": {}}"#,
+    )
+    .expect("deprecated config fixture should write");
+
+    let envs = [
+        (
+            "CLAW_CONFIG_HOME",
+            config_home.to_str().expect("utf8 config home"),
+        ),
+        ("HOME", home.to_str().expect("utf8 home")),
+    ];
+
+    for args in [&["plugins", "list"][..], &["mcp", "list"][..]] {
+        let output = run_claw(&root, args, &envs);
+        assert!(
+            output.status.success(),
+            "args={args:?}\nstdout:\n{}\n\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+        let warning_count = stderr
+            .matches("field \"enabledPlugins\" is deprecated")
+            .count();
+        assert_eq!(
+            warning_count, 1,
+            "args={args:?} should emit the deprecated enabledPlugins warning once per process:\n{stderr}"
+        );
+    }
+}
+
 fn assert_json_command(current_dir: &Path, args: &[&str]) -> Value {
     assert_json_command_with_env(current_dir, args, &[])
 }
@@ -953,7 +1213,21 @@ fn assert_json_command_with_env(current_dir: &Path, args: &[&str], envs: &[(&str
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    serde_json::from_slice(&output.stdout).expect("stdout should be valid json")
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid json");
+    assert_non_empty_action(&parsed, args);
+    parsed
+}
+
+fn assert_non_empty_action(parsed: &Value, args: &[&str]) {
+    let action = parsed
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    assert!(
+        !action.trim().is_empty(),
+        "JSON output for args={args:?} must include a non-empty stable action field: {parsed}"
+    );
 }
 
 fn run_claw(current_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
@@ -963,6 +1237,10 @@ fn run_claw(current_dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output 
         command.env(key, value);
     }
     command.output().expect("claw should launch")
+}
+
+fn strings(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| (*item).to_string()).collect()
 }
 
 fn write_upstream_fixture(root: &Path) -> PathBuf {
@@ -1074,6 +1352,434 @@ fn diff_json_has_status_and_result_field_702() {
         parsed.get("result").is_some(),
         "diff JSON must have result field"
     );
+    // #710: diff JSON must have action:diff and working_directory
+    assert_eq!(
+        parsed["action"], "diff",
+        "diff JSON must have action:diff (#710)"
+    );
+    assert!(
+        parsed
+            .get("working_directory")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "diff JSON must have working_directory field (#710)"
+    );
+    // #740: diff JSON changed_file_count contract: numeric in git repos, absent for no_git_repo
+    let result_str = parsed.get("result").and_then(|v| v.as_str());
+    if result_str == Some("no_git_repo") {
+        // Non-git repos don't emit changed_file_count
+        assert!(
+            parsed.get("changed_file_count").is_none(),
+            "diff JSON should not have changed_file_count for no_git_repo (#733)"
+        );
+    } else {
+        // Git repos must emit numeric changed_file_count
+        assert!(
+            parsed
+                .get("changed_file_count")
+                .and_then(|v| v.as_u64())
+                .is_some(),
+            "diff JSON changed_file_count must be numeric in git repos (#733)"
+        );
+    }
+}
+
+#[test]
+fn diff_json_changed_file_count_deduplication_733() {
+    // #733/#742: changed_file_count must be numeric in a git repo, be 0 for clean,
+    // and deduplicate staged+unstaged edits to the same file (1 file changed = count 1).
+    use std::process::Command;
+    let root = unique_temp_dir("diff-changed-dedup");
+    fs::create_dir_all(&root).expect("temp dir");
+
+    // git init + identity config + initial commit
+    Command::new("git")
+        .args(["init"])
+        .current_dir(&root)
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .args(["config", "user.email", "test@claw.test"])
+        .current_dir(&root)
+        .output()
+        .expect("git config email");
+    Command::new("git")
+        .args(["config", "user.name", "Test"])
+        .current_dir(&root)
+        .output()
+        .expect("git config name");
+    fs::write(root.join("tracked.txt"), b"v1").expect("write tracked");
+    Command::new("git")
+        .args(["add", "tracked.txt"])
+        .current_dir(&root)
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .args(["commit", "-m", "init"])
+        .current_dir(&root)
+        .output()
+        .expect("git commit");
+
+    // Clean state: changed_file_count must be 0
+    let bin = env!("CARGO_BIN_EXE_claw");
+    let clean = Command::new(bin)
+        .current_dir(&root)
+        .args(["--output-format", "json", "diff"])
+        .output()
+        .expect("claw diff clean");
+    let clean_json: serde_json::Value =
+        serde_json::from_slice(&clean.stdout).expect("diff clean stdout must be valid JSON");
+    assert_eq!(clean_json["result"], "clean", "fresh repo must be clean");
+    assert_eq!(
+        clean_json["changed_file_count"].as_u64(),
+        Some(0),
+        "clean repo must have changed_file_count:0 (#733)"
+    );
+
+    // Make a staged edit AND an unstaged edit to the same file
+    fs::write(root.join("tracked.txt"), b"v2").expect("staged write");
+    Command::new("git")
+        .args(["add", "tracked.txt"])
+        .current_dir(&root)
+        .output()
+        .expect("git add staged");
+    fs::write(root.join("tracked.txt"), b"v3").expect("unstaged write");
+
+    // Dirty state: same file appears in staged+unstaged — must deduplicate to count 1
+    let dirty = Command::new(bin)
+        .current_dir(&root)
+        .args(["--output-format", "json", "diff"])
+        .output()
+        .expect("claw diff dirty");
+    let dirty_json: serde_json::Value =
+        serde_json::from_slice(&dirty.stdout).expect("diff dirty stdout must be valid JSON");
+    assert_eq!(
+        dirty_json["result"], "changes",
+        "dirty repo must have result:changes (#733)"
+    );
+    assert_eq!(
+        dirty_json["changed_file_count"].as_u64(),
+        Some(1),
+        "staged+unstaged edits to same file must deduplicate to changed_file_count:1 (#733)"
+    );
+}
+
+#[test]
+fn prompt_no_arg_json_error_kind_750() {
+    // #751/#750: `claw prompt --output-format json` with no prompt argument must emit
+    // error_kind:"missing_prompt" and a non-empty hint. Before #750 it returned
+    // error_kind:"unknown" + hint:null.
+    use std::process::Command;
+    let root = unique_temp_dir("prompt-no-arg");
+    fs::create_dir_all(&root).expect("temp dir");
+    let bin = env!("CARGO_BIN_EXE_claw");
+
+    let output = Command::new(bin)
+        .current_dir(&root)
+        .args(["--output-format", "json", "prompt"])
+        .output()
+        .expect("claw prompt should run");
+    assert!(
+        !output.status.success(),
+        "claw prompt with no arg must exit non-zero"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .collect::<Vec<_>>()
+        .join("");
+    let raw = if stdout.trim().starts_with('{') {
+        stdout.trim().to_string()
+    } else {
+        stderr
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| {
+        panic!("claw prompt (no arg) --output-format json must emit valid JSON; got: {raw}")
+    });
+    assert_eq!(
+        parsed["error_kind"], "missing_prompt",
+        "claw prompt no-arg must have error_kind:missing_prompt (#750); got: {parsed}"
+    );
+    let hint = parsed["hint"].as_str().unwrap_or("");
+    assert!(
+        !hint.is_empty(),
+        "claw prompt no-arg hint must be non-empty (#750)"
+    );
+    assert!(
+        hint.contains("claw prompt") || hint.contains("echo"),
+        "hint should mention 'claw prompt' or 'echo': {hint}"
+    );
+}
+
+#[test]
+fn flag_value_errors_have_error_kind_and_hint_756() {
+    // #756: missing/invalid flag-value errors must emit typed error_kind + non-null hint.
+    // Before #756: all returned error_kind:"unknown" + hint:null.
+    use std::process::Command;
+    let root = unique_temp_dir("flag-value-errors");
+    fs::create_dir_all(&root).expect("temp dir");
+    let bin = env!("CARGO_BIN_EXE_claw");
+
+    // Case 1: --reasoning-effort with invalid value
+    let out = Command::new(bin)
+        .current_dir(&root)
+        .args(["--output-format", "json", "--reasoning-effort", "HIGH"])
+        .output()
+        .expect("claw --reasoning-effort HIGH should run");
+    assert!(
+        !out.status.success(),
+        "invalid reasoning-effort must exit non-zero"
+    );
+    let raw = String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .collect::<Vec<_>>()
+        .join("");
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|_| panic!("invalid --reasoning-effort must emit JSON; got: {raw}"));
+    assert_eq!(
+        parsed["error_kind"], "invalid_flag_value",
+        "invalid --reasoning-effort must be invalid_flag_value (#756): {parsed}"
+    );
+    assert!(
+        parsed["hint"].as_str().map_or(false, |h| h.contains("low")
+            || h.contains("medium")
+            || h.contains("high")),
+        "hint must mention valid values (#756): {parsed}"
+    );
+
+    // Case 2: --model flag with missing value (trailing flag)
+    let out2 = Command::new(bin)
+        .current_dir(&root)
+        .args(["--output-format", "json", "--model"])
+        .output()
+        .expect("claw --model (no value) should run");
+    assert!(
+        !out2.status.success(),
+        "missing --model value must exit non-zero"
+    );
+    let raw2 = String::from_utf8_lossy(&out2.stderr)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .collect::<Vec<_>>()
+        .join("");
+    let parsed2: serde_json::Value = serde_json::from_str(&raw2)
+        .unwrap_or_else(|_| panic!("missing --model value must emit JSON; got: {raw2}"));
+    assert_eq!(
+        parsed2["error_kind"], "missing_flag_value",
+        "missing --model value must be missing_flag_value (#756): {parsed2}"
+    );
+    assert!(
+        parsed2["hint"].as_str().map_or(false, |h| !h.is_empty()),
+        "missing --model hint must be non-empty (#756): {parsed2}"
+    );
+}
+
+#[test]
+fn short_p_flag_swallows_no_flags_755() {
+    // #755: `claw -p hello --output-format json` must parse --output-format json
+    // as a flag rather than swallowing it as part of the prompt. Before #755,
+    // args[index+1..].join(" ") consumed all remaining tokens into the prompt.
+    // After #755, -p consumes exactly one token and remaining flags are parsed.
+    // We verify by checking that the envelope IS JSON (meaning --output-format json
+    // was interpreted as a flag, not literal prompt text).
+    use std::process::Command;
+    let root = unique_temp_dir("short-p-flags");
+    fs::create_dir_all(&root).expect("temp dir");
+    let bin = env!("CARGO_BIN_EXE_claw");
+
+    // -p hello --output-format json: with no credentials, should fail with
+    // missing_credentials (not missing_prompt), proving --output-format json was parsed.
+    let output = Command::new(bin)
+        .current_dir(&root)
+        .args(["-p", "hello", "--output-format", "json"])
+        .env_remove("ANTHROPIC_API_KEY")
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .output()
+        .expect("claw -p should run");
+    assert!(
+        !output.status.success(),
+        "claw -p hello --output-format json must exit non-zero (no credentials)"
+    );
+    let raw = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .collect::<Vec<_>>()
+        .join("");
+    // Must be valid JSON (i.e. --output-format json was parsed, not swallowed)
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| {
+        panic!("--output-format json must be parsed as a flag, not prompt text; stderr: {raw}")
+    });
+    assert_eq!(
+        parsed["error_kind"], "missing_credentials",
+        "flags after -p prompt text must be parsed normally (#755); got: {parsed}"
+    );
+
+    // Also verify -p --model bogus is rejected as missing_prompt (flag-as-prompt guard)
+    let output2 = Command::new(bin)
+        .current_dir(&root)
+        .args(["--output-format", "json", "-p", "--model", "sonnet"])
+        .output()
+        .expect("claw -p flag-as-prompt should run");
+    let raw2 = String::from_utf8_lossy(&output2.stderr)
+        .lines()
+        .filter(|l| l.starts_with('{'))
+        .collect::<Vec<_>>()
+        .join("");
+    let parsed2: serde_json::Value = serde_json::from_str(&raw2)
+        .unwrap_or_else(|_| panic!("claw -p --model must emit JSON; got: {raw2}"));
+    assert_eq!(
+        parsed2["error_kind"], "missing_prompt",
+        "flag-like token after -p must be rejected as missing_prompt (#755): {parsed2}"
+    );
+    assert!(
+        parsed2["hint"].as_str().map_or(false, |h| !h.is_empty()),
+        "missing_prompt hint must be non-empty (#755)"
+    );
+}
+
+#[test]
+fn short_p_flag_no_arg_json_error_kind_753() {
+    // #753: `claw --output-format json -p` (no prompt) must emit error_kind:"missing_prompt"
+    // and non-empty hint. Before #753 it returned error_kind:"unknown" + hint:null.
+    // Parity with #750 which fixed the explicit `prompt` verb.
+    use std::process::Command;
+    let root = unique_temp_dir("short-p-no-arg");
+    fs::create_dir_all(&root).expect("temp dir");
+    let bin = env!("CARGO_BIN_EXE_claw");
+
+    let output = Command::new(bin)
+        .current_dir(&root)
+        .args(["--output-format", "json", "-p"])
+        .output()
+        .expect("claw -p should run");
+    assert!(
+        !output.status.success(),
+        "claw -p with no arg must exit non-zero"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw = if stdout.trim().starts_with('{') {
+        stdout.trim().to_string()
+    } else {
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|l| l.starts_with('{'))
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_else(|_| {
+        panic!("claw -p (no arg) --output-format json must emit valid JSON; got: {raw}")
+    });
+    assert_eq!(
+        parsed["error_kind"], "missing_prompt",
+        "claw -p no-arg must have error_kind:missing_prompt (#753); got: {parsed}"
+    );
+    let hint = parsed["hint"].as_str().unwrap_or("");
+    assert!(
+        !hint.is_empty(),
+        "claw -p no-arg hint must be non-empty (#753)"
+    );
+    assert!(
+        hint.contains("claw -p") || hint.contains("claw prompt"),
+        "hint should mention 'claw -p' or 'claw prompt': {hint}"
+    );
+}
+
+#[test]
+fn bare_slash_command_hint_745() {
+    // #747/#745: claw <slash-cmd> --output-format json must return non-null hint.
+    // bare_slash_command_guidance() previously had no \n so split_error_hint returned hint:null.
+    use std::process::Command;
+    let root = unique_temp_dir("bare-slash-hint");
+    fs::create_dir_all(&root).expect("temp dir");
+    let bin = env!("CARGO_BIN_EXE_claw");
+
+    // issue and pr are non-resume-supported; commit is resume-supported.
+    // All must emit non-null hint in their interactive_only error envelope.
+    for cmd in &["issue", "pr", "commit"] {
+        let output = Command::new(bin)
+            .current_dir(&root)
+            .args(["--output-format", "json", cmd])
+            .env("ANTHROPIC_API_KEY", "test")
+            .output()
+            .expect("claw should run");
+        assert!(
+            !output.status.success(),
+            "claw {cmd} outside REPL must exit non-zero"
+        );
+        // Error envelope is on stderr (type:error path) or stdout
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .filter(|l| l.starts_with('{'))
+            .collect::<Vec<_>>()
+            .join("");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let raw = if !stderr.is_empty() {
+            stderr
+        } else {
+            stdout.trim().to_string()
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|_| panic!("claw {cmd} must emit JSON; got: {raw}"));
+        assert_eq!(
+            parsed["error_kind"], "interactive_only",
+            "claw {cmd} must have error_kind:interactive_only (#745)"
+        );
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "claw {cmd} --output-format json hint must be non-empty (#745); got null"
+        );
+    }
+}
+
+#[test]
+fn config_unsupported_section_json_hint_741() {
+    // #744/#741: claw config <unknown-section> --output-format json must return
+    // error_kind:unsupported_config_section with a non-null hint and supported_sections[].
+    // This is the regression guard for #741 (hint was null before fix).
+    use std::process::Command;
+    let root = unique_temp_dir("config-unsupported-section");
+    fs::create_dir_all(&root).expect("temp dir");
+    let bin = env!("CARGO_BIN_EXE_claw");
+
+    for section in &["list", "show", "bogus", "help"] {
+        let output = Command::new(bin)
+            .current_dir(&root)
+            .args(["--output-format", "json", "config", section])
+            .output()
+            .expect("claw config should run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|_| {
+            panic!("claw config {section} --output-format json must emit valid JSON; got: {stdout}")
+        });
+        assert_eq!(
+            parsed["kind"], "config",
+            "config {section} JSON must have kind:config (#741)"
+        );
+        assert_eq!(
+            parsed["status"], "error",
+            "config {section} must return status:error (#741)"
+        );
+        assert_eq!(
+            parsed["error_kind"], "unsupported_config_section",
+            "config {section} must return error_kind:unsupported_config_section (#741)"
+        );
+        // #741: hint must be a non-empty string (was null before fix)
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "config {section} --output-format json hint must be non-empty (#741)"
+        );
+        // supported_sections must still be present and non-empty
+        assert!(
+            parsed["supported_sections"]
+                .as_array()
+                .map_or(false, |a| !a.is_empty()),
+            "config {section} JSON must include supported_sections (#741)"
+        );
+    }
 }
 
 #[test]
@@ -1130,4 +1836,1009 @@ fn export_json_has_kind_702() {
             "export error envelope must have type:error"
         );
     }
+}
+
+#[test]
+fn config_parse_error_has_typed_error_kind_and_hint_764() {
+    // #764: Malformed .claw/settings.json must emit error_kind:config_parse_error
+    // and a non-null hint in --output-format json mode (was error_kind:"unknown"
+    // + hint:null before #763/#764 fixes).
+    let root = unique_temp_dir("config-parse-error-764");
+    fs::create_dir_all(root.join(".claw")).expect("temp .claw dir should exist");
+
+    // Write an invalid JSON file (type mismatch: model must be a string)
+    fs::write(root.join(".claw").join("settings.json"), r#"{"model": 99}"#)
+        .expect("settings.json should write");
+
+    let output = run_claw(&root, &["--output-format", "json", "config", "show"], &[]);
+    assert!(
+        !output.status.success(),
+        "malformed settings.json should cause non-zero exit"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json_line = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .expect("stderr should contain a JSON error envelope");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_line).expect("error envelope should be valid JSON");
+
+    assert_eq!(
+        parsed["error_kind"], "config_parse_error",
+        "malformed settings.json must return error_kind:config_parse_error (#763)"
+    );
+    let hint = parsed["hint"].as_str().unwrap_or("");
+    assert!(
+        !hint.is_empty(),
+        "malformed settings.json must return non-null hint (#764), got: {hint:?}"
+    );
+}
+
+#[test]
+fn login_logout_removed_subcommands_have_error_kind_and_hint_765() {
+    // #765: `claw login` and `claw logout` are removed; JSON envelope must carry
+    // error_kind:removed_subcommand + non-null hint pointing to the env var migration.
+    // Before fix: single-line error string → error_kind:"unknown" + hint:null.
+    let root = unique_temp_dir("login-logout-removed-765");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    for subcmd in &["login", "logout"] {
+        let output = run_claw(&root, &["--output-format", "json", subcmd], &[]);
+        assert!(
+            !output.status.success(),
+            "claw {subcmd} should exit non-zero"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let json_line = stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with('{'))
+            .unwrap_or_else(|| panic!("claw {subcmd} stderr should contain a JSON envelope"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_line).expect("error envelope should be valid JSON");
+
+        assert_eq!(
+            parsed["error_kind"], "removed_subcommand",
+            "claw {subcmd} must return error_kind:removed_subcommand (#765)"
+        );
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "claw {subcmd} must return non-null hint (#765), got: {hint:?}"
+        );
+        assert!(
+            hint.contains("ANTHROPIC_API_KEY") || hint.contains("ANTHROPIC_AUTH_TOKEN"),
+            "claw {subcmd} hint must mention the env var migration path, got: {hint:?}"
+        );
+    }
+}
+
+#[test]
+fn diff_extra_args_have_typed_error_kind_and_hint_766() {
+    // #766: `claw diff --bogus` returned error_kind:"unknown" + hint:null.
+    // `diff` takes no arguments; extra args were unclassified with no remediation.
+    let root = unique_temp_dir("diff-extra-args-766");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+    // Need a git repo for diff to parse past arg validation
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    let output = run_claw(&root, &["--output-format", "json", "diff", "--bogus"], &[]);
+    assert!(
+        !output.status.success(),
+        "claw diff --bogus should exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json_line = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .expect("stderr should contain a JSON error envelope");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_line).expect("error envelope should be valid JSON");
+
+    assert_eq!(
+        parsed["error_kind"], "unexpected_extra_args",
+        "claw diff --bogus must return error_kind:unexpected_extra_args (#766)"
+    );
+    let hint = parsed["hint"].as_str().unwrap_or("");
+    assert!(
+        !hint.is_empty(),
+        "claw diff --bogus must return non-null hint (#766), got: {hint:?}"
+    );
+}
+
+#[test]
+fn resume_non_slash_trailing_arg_has_typed_error_kind_and_hint_768() {
+    // #768: `claw --resume latest compact` (missing leading /) returned
+    // error_kind:"unknown" + hint:null. Resume is orchestration-critical;
+    // wrappers need a machine-readable signal with a recovery hint.
+    let root = unique_temp_dir("resume-invalid-arg-768");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let output = run_claw(
+        &root,
+        &["--output-format", "json", "--resume", "latest", "compact"],
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "claw --resume latest compact should exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json_line = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .expect("stderr should contain a JSON error envelope");
+    let parsed: serde_json::Value =
+        serde_json::from_str(json_line).expect("error envelope should be valid JSON");
+
+    assert_eq!(
+        parsed["error_kind"], "invalid_resume_argument",
+        "non-slash resume trailing arg must return error_kind:invalid_resume_argument (#768)"
+    );
+    let hint = parsed["hint"].as_str().unwrap_or("");
+    assert!(
+        !hint.is_empty(),
+        "non-slash resume trailing arg must return non-null hint (#768), got: {hint:?}"
+    );
+    assert!(
+        hint.contains("/compact") || hint.contains("slash-command"),
+        "hint must reference slash-command usage, got: {hint:?}"
+    );
+}
+
+#[test]
+fn session_with_unknown_subcommand_returns_interactive_only_not_credentials_767() {
+    // #767: `claw session bogus` bypassed all guards and fell through to
+    // CliAction::Prompt, reaching the credential-check gate and returning
+    // error_kind:"missing_credentials" instead of a structured routing error.
+    // Fix: explicit "session" match arm returns interactive_only guidance.
+    let root = unique_temp_dir("session-unknown-767");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    for sub in &["bogus", "nuke", "delete-all"] {
+        let output = run_claw(&root, &["--output-format", "json", "session", sub], &[]);
+        assert!(
+            !output.status.success(),
+            "claw session {sub} should exit non-zero"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let json_line = stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with('{'))
+            .unwrap_or_else(|| panic!("claw session {sub} stderr should contain JSON"));
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_line).expect("error envelope should be valid JSON");
+
+        assert_eq!(
+            parsed["error_kind"], "interactive_only",
+            "claw session {sub} must return error_kind:interactive_only (#767), not missing_credentials"
+        );
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "claw session {sub} must return non-null hint (#767)"
+        );
+        assert!(
+            hint.contains("/session") || hint.contains("--resume"),
+            "hint must reference /session usage, got: {hint:?}"
+        );
+    }
+}
+
+#[test]
+fn slash_only_verbs_with_args_return_interactive_only_not_credentials_770() {
+    // #770: `claw cost breakdown`, `claw clear --force`, `claw memory reset`,
+    // `claw ultraplan bogus`, `claw model opus extra` all fell through to
+    // CliAction::Prompt and reached the credential gate, returning
+    // error_kind:"missing_credentials". These are all slash-only commands;
+    // any multi-token invocation should return interactive_only guidance.
+    let root = unique_temp_dir("slash-verbs-770");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let cases: &[&[&str]] = &[
+        &["cost", "breakdown"],
+        &["clear", "--force"],
+        &["memory", "reset"],
+        &["ultraplan", "bogus"],
+        &["model", "opus", "extra"],
+    ];
+
+    for args in cases {
+        let full_args: Vec<&str> = std::iter::once("--output-format")
+            .chain(std::iter::once("json"))
+            .chain(args.iter().copied())
+            .collect();
+        let output = run_claw(&root, &full_args, &[]);
+        assert!(
+            !output.status.success(),
+            "claw {} should exit non-zero",
+            args.join(" ")
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let json_line = stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with('{'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "claw {} stderr should contain JSON, got: {stderr}",
+                    args.join(" ")
+                )
+            });
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_line).expect("error envelope should be valid JSON");
+
+        assert_eq!(
+            parsed["error_kind"],
+            "interactive_only",
+            "claw {} must return error_kind:interactive_only (#770), not missing_credentials",
+            args.join(" ")
+        );
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "claw {} must return non-null hint (#770)",
+            args.join(" ")
+        );
+    }
+}
+
+#[test]
+fn agents_plugins_mcp_unknown_subcommand_have_hint_774() {
+    // #774: `claw agents bogus`, `claw plugins bogus`, `claw mcp bogus` returned
+    // hint:null despite having correct error_kind. Fixed by adding \n delimiter
+    // to error strings in commands/src/lib.rs and explicit hint in mcp JSON envelope.
+    let root = unique_temp_dir("unknown-subcommands-774");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    // agents bogus
+    {
+        let output = run_claw(&root, &["--output-format", "json", "agents", "bogus"], &[]);
+        assert!(!output.status.success(), "agents bogus should fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let json_line = stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with('{'))
+            .expect("agents bogus should emit JSON error");
+        let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
+        assert_eq!(parsed["error_kind"], "unknown_agents_subcommand");
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "agents bogus hint must be non-null (#774)"
+        );
+        assert!(
+            hint.contains("list") || hint.contains("show") || hint.contains("help"),
+            "agents bogus hint must mention supported actions, got: {hint:?}"
+        );
+    }
+
+    // plugins bogus
+    {
+        let output = run_claw(&root, &["--output-format", "json", "plugins", "bogus"], &[]);
+        assert!(!output.status.success(), "plugins bogus should fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let json_line = stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with('{'))
+            .expect("plugins bogus should emit JSON error");
+        let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
+        assert_eq!(parsed["error_kind"], "unknown_plugins_action");
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "plugins bogus hint must be non-null (#774)"
+        );
+    }
+
+    // mcp bogus
+    {
+        let output = run_claw(&root, &["--output-format", "json", "mcp", "bogus"], &[]);
+        assert!(!output.status.success(), "mcp bogus should fail");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let json_str = if stdout.trim().starts_with('{') {
+            stdout.to_string()
+        } else {
+            stderr
+                .lines()
+                .find(|l| l.trim_start().starts_with('{'))
+                .unwrap_or("")
+                .to_string()
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_str.trim()).expect("mcp bogus should emit JSON");
+        assert_eq!(parsed["error_kind"], "unknown_mcp_action");
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(!hint.is_empty(), "mcp bogus hint must be non-null (#774)");
+    }
+}
+
+#[test]
+fn interactive_only_guard_batch_769_to_771() {
+    // #769-#771: a sweep of slash-only verbs with args that previously fell to
+    // CliAction::Prompt hitting the credential gate. All must return
+    // error_kind:interactive_only (not missing_credentials) with non-null hint.
+    let root = unique_temp_dir("interactive-only-batch-769-771");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+    // Need a git repo for some subcommands
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    let cases: &[&[&str]] = &[
+        // #769: session with unknown subcommand
+        &["session", "bogus"],
+        &["session", "nuke"],
+        // #770: slash-only verbs with trailing args
+        &["cost", "breakdown"],
+        &["clear", "--force"],
+        &["memory", "reset"],
+        &["ultraplan", "bogus"],
+        &["model", "opus", "extra"],
+        // #771: usage/stats/fork
+        &["usage", "extra"],
+        &["stats", "extra"],
+        &["fork", "newbranch"],
+    ];
+
+    for args in cases {
+        let full_args: Vec<&str> = std::iter::once("--output-format")
+            .chain(std::iter::once("json"))
+            .chain(args.iter().copied())
+            .collect();
+        let output = run_claw(&root, &full_args, &[]);
+        assert!(
+            !output.status.success(),
+            "claw {} should exit non-zero",
+            args.join(" ")
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let json_line = stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with('{'))
+            .unwrap_or_else(|| {
+                panic!(
+                    "claw {} should emit JSON, got stderr: {stderr}",
+                    args.join(" ")
+                )
+            });
+        let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
+        assert_eq!(
+            parsed["error_kind"],
+            "interactive_only",
+            "claw {} must return interactive_only, got {:?}",
+            args.join(" "),
+            parsed["error_kind"]
+        );
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "claw {} must have non-null hint",
+            args.join(" ")
+        );
+    }
+}
+
+#[test]
+fn resume_plugin_mutations_are_typed_interactive_only_777() {
+    // #777: `/plugins install|enable|disable|uninstall|update` in resume mode returned
+    // a generic single-line error; after #776's classify/split it fell to
+    // error_kind:"unknown" + hint:null because there was no interactive_only: prefix.
+    // Fix: each mutation arm now returns "interactive_only: ... \n..." so the caller
+    // gets error_kind:interactive_only + non-null hint pointing at live REPL.
+    let root = unique_temp_dir("resume-plugin-mutations-777");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    // Create a minimal session file so we get past session load and into command dispatch
+    let session_file = write_session_fixture(&root, "resume-plugin-777", None);
+
+    for mutation in &["install", "enable", "disable", "uninstall", "update"] {
+        let cmd = format!("/plugins {mutation} my-plugin");
+        let output = run_claw(
+            &root,
+            &[
+                "--resume",
+                session_file.to_str().unwrap(),
+                "--output-format",
+                "json",
+                &cmd,
+            ],
+            &[],
+        );
+        assert!(
+            !output.status.success(),
+            "/plugins {mutation} in resume mode should exit non-zero"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let json_line = stderr
+            .lines()
+            .find(|l| l.trim_start().starts_with('{'))
+            .unwrap_or_else(|| {
+                panic!("/plugins {mutation} should emit JSON error, got stderr: {stderr}")
+            });
+        let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
+        assert_eq!(
+            parsed["error_kind"], "interactive_only",
+            "/plugins {mutation} must return interactive_only, got {:?}",
+            parsed["error_kind"]
+        );
+        let hint = parsed["hint"].as_str().unwrap_or("");
+        assert!(
+            !hint.is_empty(),
+            "/plugins {mutation} must have non-null hint (#777)"
+        );
+        assert!(
+            hint.contains("claw") || hint.contains("REPL") || hint.contains("plugins"),
+            "/plugins {mutation} hint must reference live session or CLI, got: {hint:?}"
+        );
+    }
+}
+
+#[test]
+fn resume_skills_invocation_is_typed_interactive_only_779() {
+    // #779: `/skills <skill>` invocation in resume mode returned bare prose;
+    // after #776 classify/split it fell to error_kind:"unknown" + hint:null.
+    // Fix: use interactive_only: prefix + \n hint so callers get typed fields.
+    let root = unique_temp_dir("resume-skills-invocation-779");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+    let session_file = write_session_fixture(&root, "resume-skills-779", None);
+
+    // A non-empty skills arg that would classify as Invoke
+    let output = run_claw(
+        &root,
+        &[
+            "--resume",
+            session_file.to_str().unwrap(),
+            "--output-format",
+            "json",
+            "/skills my-skill",
+        ],
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "/skills <skill> in resume mode should exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json_line = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .unwrap_or_else(|| {
+            panic!("/skills invocation should emit JSON error, got stderr: {stderr}")
+        });
+    let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
+    assert_eq!(
+        parsed["error_kind"], "interactive_only",
+        "resumed /skills invocation must return interactive_only, got {:?}",
+        parsed["error_kind"]
+    );
+    let hint = parsed["hint"].as_str().unwrap_or("");
+    assert!(
+        !hint.is_empty(),
+        "resumed /skills invocation must have non-null hint (#779)"
+    );
+    assert!(
+        hint.contains("claw") || hint.contains("REPL") || hint.contains("skills"),
+        "hint must reference live session or CLI, got: {hint:?}"
+    );
+}
+
+#[test]
+fn acp_unsupported_invocation_has_hint_782() {
+    // #782: `claw acp start` returned error_kind:unsupported_acp_invocation but hint:null
+    // because the remediation text was on the same line as the error message.
+    // Fix: add \n-delimited hint so split_error_hint extracts it.
+    let root = unique_temp_dir("acp-unsupported-782");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    let output = run_claw(&root, &["--output-format", "json", "acp", "start"], &[]);
+    assert!(!output.status.success(), "acp start should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let json_line = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .expect("should emit JSON error");
+    let parsed: serde_json::Value = serde_json::from_str(json_line).unwrap();
+    assert_eq!(
+        parsed["error_kind"], "unsupported_acp_invocation",
+        "unsupported ACP invocation should be classified correctly"
+    );
+    let hint = parsed["hint"]
+        .as_str()
+        .expect("hint must be non-null (#782)");
+    assert!(!hint.is_empty(), "hint must not be empty");
+    assert!(
+        hint.contains("discoverability") || hint.contains("ROADMAP"),
+        "hint should explain the discoverability-only status, got: {hint:?}"
+    );
+}
+
+#[test]
+fn init_json_envelope_has_hint_and_already_initialized_783() {
+    // #783: claw --output-format json init was missing the hint field entirely.
+    // Also added already_initialized: bool so orchestrators can detect the idempotent
+    // case without checking created.len() == 0.
+    let root = unique_temp_dir("init-hint-783");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    // Fresh init — already_initialized should be false, hint should mention CLAUDE.md
+    let output = run_claw(&root, &["--output-format", "json", "init"], &[]);
+    assert!(output.status.success(), "init should succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let raw = if stdout.trim_start().starts_with('{') {
+        &*stdout
+    } else {
+        &*stderr
+    };
+    let parsed: serde_json::Value = serde_json::from_str(raw.trim()).unwrap_or_else(|_| {
+        // multi-line JSON; find the whole block
+        serde_json::from_str(raw).expect("should emit valid JSON")
+    });
+
+    assert_eq!(parsed["status"], "ok", "init should succeed");
+    assert!(
+        parsed.get("already_initialized").is_some(),
+        "init JSON must include already_initialized field (#783)"
+    );
+    assert_eq!(
+        parsed["already_initialized"], false,
+        "first init: already_initialized must be false"
+    );
+    let hint = parsed["hint"]
+        .as_str()
+        .expect("hint must be present and non-null (#783)");
+    assert!(!hint.is_empty(), "hint must not be empty");
+    assert!(
+        hint.contains("CLAUDE.md") || hint.contains("doctor"),
+        "fresh-init hint should mention CLAUDE.md or doctor, got: {hint:?}"
+    );
+
+    // Idempotent re-init — already_initialized should be true
+    let output2 = run_claw(&root, &["--output-format", "json", "init"], &[]);
+    assert!(output2.status.success(), "re-init should succeed");
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    let raw2 = if stdout2.trim_start().starts_with('{') {
+        &*stdout2
+    } else {
+        &*stderr2
+    };
+    let parsed2: serde_json::Value = serde_json::from_str(raw2.trim())
+        .or_else(|_| serde_json::from_str(raw2))
+        .expect("re-init should emit valid JSON");
+    assert_eq!(
+        parsed2["already_initialized"], true,
+        "re-init: already_initialized must be true"
+    );
+    let hint2 = parsed2["hint"]
+        .as_str()
+        .expect("hint must be present on re-init");
+    assert!(
+        hint2.contains("already") || hint2.contains("doctor"),
+        "re-init hint should acknowledge workspace exists, got: {hint2:?}"
+    );
+}
+
+#[test]
+fn export_arg_errors_have_typed_kind_and_hint_784() {
+    // #784: `claw export --output` (missing flag value) returned error_kind:"unknown" + hint:null.
+    // `claw export a.md b.md` (extra positional) also returned unknown+null.
+    // Both export arg errors now use typed prefixes + usage hint.
+    let root = unique_temp_dir("export-arg-errors-784");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    // Missing --output value
+    let out1 = run_claw(
+        &root,
+        &["--output-format", "json", "export", "--output"],
+        &[],
+    );
+    assert!(!out1.status.success(), "--output with no value should fail");
+    let stderr1 = String::from_utf8_lossy(&out1.stderr);
+    let j1: serde_json::Value = stderr1
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str(l).ok())
+        .expect("missing --output should emit JSON error");
+    assert_eq!(
+        j1["error_kind"], "missing_flag_value",
+        "missing --output value should be missing_flag_value, got {:?}",
+        j1["error_kind"]
+    );
+    let h1 = j1["hint"]
+        .as_str()
+        .expect("missing_flag_value must have hint (#784)");
+    assert!(
+        !h1.is_empty() && h1.contains("export"),
+        "hint must reference export usage, got: {h1:?}"
+    );
+
+    // Extra positional argument
+    let out2 = run_claw(
+        &root,
+        &["--output-format", "json", "export", "first.md", "second.md"],
+        &[],
+    );
+    assert!(!out2.status.success(), "extra positional should fail");
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    let j2: serde_json::Value = stderr2
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str(l).ok())
+        .expect("extra positional should emit JSON error");
+    assert_eq!(
+        j2["error_kind"], "unexpected_extra_args",
+        "extra positional should be unexpected_extra_args, got {:?}",
+        j2["error_kind"]
+    );
+    let h2 = j2["hint"]
+        .as_str()
+        .expect("unexpected_extra_args must have hint (#784)");
+    assert!(
+        !h2.is_empty() && h2.contains("export"),
+        "hint must reference export usage, got: {h2:?}"
+    );
+}
+
+#[test]
+fn unknown_subcommand_returns_typed_kind_785() {
+    // #785: `claw dump` (a near-miss for dump-manifests) returned error_kind:"unknown"
+    // because the classifier had no arm for "unknown subcommand:" prose prefix.
+    // Fix: added "unknown_subcommand" arm in classify_error_kind.
+    let root = unique_temp_dir("unknown-subcommand-785");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    // "dump" is close enough to "dump-manifests" to trigger the typo suggestion path
+    let output = run_claw(&root, &["--output-format", "json", "dump"], &[]);
+    assert!(!output.status.success(), "unknown subcommand should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let j: serde_json::Value = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str(l).ok())
+        .expect("unknown subcommand should emit JSON error");
+    assert_eq!(
+        j["error_kind"], "unknown_subcommand",
+        "unknown subcommand should return unknown_subcommand kind, got {:?}",
+        j["error_kind"]
+    );
+    // hint should point at the suggestion and/or --help
+    let hint = j["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("dump-manifests") || hint.contains("--help") || hint.contains("claw"),
+        "hint should reference the suggested subcommand or help, got: {hint:?}"
+    );
+}
+
+#[test]
+fn dump_manifests_missing_dir_has_typed_kind_and_hint_786() {
+    // #786: `claw dump-manifests --manifests-dir` (no value) and `--manifests-dir=` (empty)
+    // both emitted plain "--manifests-dir requires a path" with error_kind:"unknown" + hint:null.
+    // Fix: use missing_flag_value: prefix + \n usage hint.
+    let root = unique_temp_dir("dump-manifests-missing-dir-786");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    // Case 1: --manifests-dir with no following value (next arg is --output-format)
+    let out1 = run_claw(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "dump-manifests",
+            "--manifests-dir",
+            "--output-format",
+            "json",
+        ],
+        &[],
+    );
+    assert!(!out1.status.success());
+    let stderr1 = String::from_utf8_lossy(&out1.stderr);
+    let j1: serde_json::Value = stderr1
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str(l).ok())
+        .expect("missing --manifests-dir value should emit JSON error");
+    assert_eq!(
+        j1["error_kind"], "missing_flag_value",
+        "missing --manifests-dir value should be missing_flag_value, got {:?}",
+        j1["error_kind"]
+    );
+    let h1 = j1["hint"]
+        .as_str()
+        .expect("missing_flag_value must have hint (#786)");
+    assert!(
+        h1.contains("dump-manifests") || h1.contains("manifests-dir"),
+        "hint should reference dump-manifests usage, got: {h1:?}"
+    );
+
+    // Case 2: --manifests-dir= with empty value
+    let out2 = run_claw(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "dump-manifests",
+            "--manifests-dir=",
+        ],
+        &[],
+    );
+    assert!(!out2.status.success());
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    let j2: serde_json::Value = stderr2
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str(l).ok())
+        .expect("empty --manifests-dir= should emit JSON error");
+    assert_eq!(
+        j2["error_kind"], "missing_flag_value",
+        "empty --manifests-dir= should be missing_flag_value, got {:?}",
+        j2["error_kind"]
+    );
+    let h2 = j2["hint"]
+        .as_str()
+        .expect("missing_flag_value must have hint (#786)");
+    assert!(!h2.is_empty(), "hint must not be empty");
+}
+
+#[test]
+fn resume_directory_path_returns_typed_kind_and_hint_787() {
+    // #787: `claw --resume /tmp` (directory instead of .jsonl file) returned
+    // error_kind:"session_load_failed" + hint:null. The OS error "Is a directory (os error 21)"
+    // had no \n delimiter so split_error_hint returned None, and the resume error path
+    // didn't call fallback_hint_for_error_kind.
+    // Fix: (1) added session_path_is_directory classifier arm for os error 21;
+    //      (2) wired fallback_hint_for_error_kind into both resume error emission sites.
+    let root = unique_temp_dir("resume-dir-787");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    // Pass the root directory itself as the session path
+    let output = run_claw(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "--resume",
+            root.to_str().unwrap(),
+            "/status",
+        ],
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "resume with directory should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let j: serde_json::Value = stderr
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .and_then(|l| serde_json::from_str(l).ok())
+        .expect("resume with directory should emit JSON error");
+    assert_eq!(
+        j["error_kind"], "session_path_is_directory",
+        "directory resume path should return session_path_is_directory, got {:?}",
+        j["error_kind"]
+    );
+    let hint = j["hint"]
+        .as_str()
+        .expect("session_path_is_directory must have hint (#787)");
+    assert!(
+        hint.contains(".jsonl") || hint.contains("session") || hint.contains("file"),
+        "hint should explain expected path format, got: {hint:?}"
+    );
+}
+
+#[test]
+fn skills_show_not_found_emits_single_json_object_788() {
+    // #788: `claw --output-format json skills show no-such-skill` emitted TWO JSON objects:
+    // one from the skills handler (action:"show", status:"error") and a second from the
+    // top-level error handler (action:"abort"). The skills handler returned Err() after
+    // printing its JSON, which caused the ? propagation to trigger a duplicate envelope.
+    // Fix: exit(1) directly after the skills JSON is emitted instead of returning Err.
+    let root = unique_temp_dir("skills-show-double-emit-788");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    let output = run_claw(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "skills",
+            "show",
+            "no-such-skill-xyz",
+        ],
+        &[],
+    );
+    assert!(!output.status.success(), "skills show unknown should fail");
+    // Skills handler emits JSON to stdout; the duplicate was on stderr from the main error path.
+    // After fix: stdout has 1 JSON object, stderr has none (no duplicate).
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Count JSON objects in stdout — must be exactly 1
+    let json_objects: Vec<serde_json::Value> = {
+        let mut objects = Vec::new();
+        let mut remaining = stdout.trim();
+        while !remaining.is_empty() {
+            match serde_json::from_str::<serde_json::Value>(remaining) {
+                Ok(v) => {
+                    objects.push(v);
+                    break;
+                }
+                Err(_) => {
+                    // Try finding a complete JSON object
+                    if let Some(pos) = remaining.find('{') {
+                        remaining = &remaining[pos..];
+                        let mut depth = 0i32;
+                        let mut end = 0;
+                        for (i, c) in remaining.char_indices() {
+                            match c {
+                                '{' => depth += 1,
+                                '}' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        end = i + 1;
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if end > 0 {
+                            if let Ok(v) = serde_json::from_str(&remaining[..end]) {
+                                objects.push(v);
+                                remaining = remaining[end..].trim_start();
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        objects
+    };
+
+    assert_eq!(
+        json_objects.len(),
+        1,
+        "skills show not-found must emit exactly 1 JSON object on stdout, got {}. stdout: {} stderr: {}",
+        json_objects.len(),
+        stdout,
+        stderr
+    );
+    // Verify stderr has no duplicate error JSON (the pre-#788 bug was a second abort envelope here)
+    let stderr_has_json = stderr.lines().any(|l| l.trim_start().starts_with('{'));
+    assert!(
+        !stderr_has_json,
+        "stderr must have no duplicate JSON error envelope, got: {stderr}"
+    );
+    assert_eq!(
+        json_objects[0]["error_kind"], "skill_not_found",
+        "single JSON object must have skill_not_found error_kind"
+    );
+    assert_eq!(json_objects[0]["status"], "error");
+}
+
+#[test]
+fn agents_show_not_found_exits_nonzero_789() {
+    // #789: `claw --output-format json agents show <not-found>` returned exit 0 despite
+    // emitting status:"error". print_agents had no error check — just println + Ok(()).
+    // Skills was fixed in #788 (exit 1 via process::exit); agents/plugins had the same gap.
+    let root = unique_temp_dir("agents-show-exit-789");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    let output = run_claw(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "agents",
+            "show",
+            "no-such-agent-xyz-789",
+        ],
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "agents show not-found must exit non-zero (#789), got exit 0"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("agents show should emit valid JSON");
+    assert_eq!(j["error_kind"], "agent_not_found");
+    assert_eq!(j["status"], "error");
+}
+
+#[test]
+fn plugins_show_not_found_exits_nonzero_789() {
+    // #789: same as agents — `claw --output-format json plugins show <not-found>` exited 0
+    // despite status:"error". The not-found branch used `return Ok(())` instead of exit(1).
+    let root = unique_temp_dir("plugins-show-exit-789");
+    fs::create_dir_all(&root).expect("temp dir");
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&root)
+        .output()
+        .ok();
+
+    let output = run_claw(
+        &root,
+        &[
+            "--output-format",
+            "json",
+            "plugins",
+            "show",
+            "no-such-plugin-xyz-789",
+        ],
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "plugins show not-found must exit non-zero (#789), got exit 0"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let j: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("plugins show should emit valid JSON");
+    assert_eq!(j["error_kind"], "plugin_not_found");
+    assert_eq!(j["status"], "error");
 }
