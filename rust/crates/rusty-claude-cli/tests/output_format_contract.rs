@@ -67,6 +67,64 @@ fn export_help_preserves_plaintext_in_text_mode_384() {
 }
 
 #[test]
+fn doctor_help_json_is_local_structured_and_bounded_702() {
+    let root = unique_temp_dir("doctor-help-json-702");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let parsed = assert_json_command(&root, &["--output-format", "json", "doctor", "--help"]);
+    assert_doctor_help_json_contract(&parsed);
+
+    let suffix_parsed =
+        assert_json_command(&root, &["doctor", "--help", "--output-format", "json"]);
+    assert_doctor_help_json_contract(&suffix_parsed);
+
+    let help_topic_parsed =
+        assert_json_command(&root, &["help", "doctor", "--output-format", "json"]);
+    assert_doctor_help_json_contract(&help_topic_parsed);
+}
+
+fn assert_doctor_help_json_contract(parsed: &Value) {
+    assert_eq!(parsed["kind"], "help");
+    assert_eq!(parsed["action"], "help");
+    assert_eq!(parsed["status"], "ok");
+    assert_eq!(parsed["topic"], "doctor");
+    assert_eq!(parsed["command"], "doctor");
+    assert_eq!(parsed["usage"], "claw doctor [--output-format <format>]");
+    assert_eq!(parsed["local_only"], true);
+    assert_eq!(parsed["requires_credentials"], false);
+    assert_eq!(parsed["requires_provider_request"], false);
+    assert_eq!(parsed["requires_session_resume"], false);
+    assert_eq!(parsed["mutates_workspace"], false);
+
+    let fields = parsed["output_fields"].as_array().expect("output_fields");
+    assert!(fields.iter().any(|field| field == "checks"));
+    let statuses = parsed["status_values"].as_array().expect("status_values");
+    assert!(statuses.iter().any(|status| status == "warn"));
+    let checks = parsed["check_names"].as_array().expect("check_names");
+    assert!(checks.iter().any(|check| check == "auth"));
+    assert!(checks.iter().any(|check| check == "boot preflight"));
+}
+
+#[test]
+fn doctor_help_text_stays_plaintext_and_local_702() {
+    let root = unique_temp_dir("doctor-help-text-702");
+    fs::create_dir_all(&root).expect("temp dir should exist");
+
+    let output = run_claw(&root, &["doctor", "--help"], &[]);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+    assert!(stdout.starts_with("Doctor\n"));
+    assert!(stdout.contains("Usage            claw doctor"));
+    assert!(stdout.contains("no provider request or session resume required"));
+    serde_json::from_str::<Value>(&stdout).expect_err("text help should remain plaintext");
+}
+
+#[test]
 fn version_emits_json_when_requested() {
     let root = unique_temp_dir("version-json");
     fs::create_dir_all(&root).expect("temp dir should exist");
@@ -1199,6 +1257,162 @@ fn inventory_commands_deduplicate_config_deprecation_warnings_per_process() {
             "args={args:?} should emit the deprecated enabledPlugins warning once per process:\n{stderr}"
         );
     }
+}
+
+#[test]
+fn config_json_reports_deprecations_structurally_without_stderr_duplicate_815() {
+    let root = unique_temp_dir("config-json-warning-815");
+    let config_home = root.join("config-home");
+    let home = root.join("home");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+    fs::write(
+        config_home.join("settings.json"),
+        r#"{"enabledPlugins": {}}"#,
+    )
+    .expect("deprecated config fixture should write");
+
+    let envs = [
+        (
+            "CLAW_CONFIG_HOME",
+            config_home.to_str().expect("utf8 config home"),
+        ),
+        ("HOME", home.to_str().expect("utf8 home")),
+    ];
+    let output = run_claw(&root, &["--output-format", "json", "config"], &envs);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be valid json");
+    let warnings = parsed["warnings"]
+        .as_array()
+        .expect("config JSON should include warnings[]");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|text| text.contains("field \"enabledPlugins\" is deprecated"))),
+        "config JSON warnings[] should include enabledPlugins deprecation: {parsed}"
+    );
+
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(
+        !stderr.contains("field \"enabledPlugins\" is deprecated"),
+        "JSON config should not duplicate collected config deprecations on stderr:\n{stderr}"
+    );
+
+    let text_output = run_claw(&root, &["config"], &envs);
+    assert!(
+        text_output.status.success(),
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&text_output.stdout),
+        String::from_utf8_lossy(&text_output.stderr)
+    );
+    let text_stderr = String::from_utf8(text_output.stderr).expect("stderr utf8");
+    assert!(
+        text_stderr.contains("field \"enabledPlugins\" is deprecated"),
+        "text config should keep human-readable config warnings on stderr"
+    );
+}
+
+#[test]
+fn local_json_surfaces_suppress_config_deprecation_stderr_816() {
+    let root = unique_temp_dir("global-json-warning-816");
+    let config_home = root.join("config-home");
+    let home = root.join("home");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+    fs::write(
+        config_home.join("settings.json"),
+        r#"{"enabledPlugins": {}}"#,
+    )
+    .expect("deprecated config fixture should write");
+
+    let envs = [
+        (
+            "CLAW_CONFIG_HOME",
+            config_home.to_str().expect("utf8 config home"),
+        ),
+        ("HOME", home.to_str().expect("utf8 home")),
+    ];
+
+    for (args, expected_kind, expected_action) in [
+        (
+            &["--output-format", "json", "plugins", "list"][..],
+            "plugin",
+            "list",
+        ),
+        (
+            &["--output-format", "json", "mcp", "list"][..],
+            "mcp",
+            "list",
+        ),
+        (
+            &["--output-format", "json", "doctor"][..],
+            "doctor",
+            "doctor",
+        ),
+    ] {
+        let output = run_claw(&root, args, &envs);
+        assert!(
+            output.status.success(),
+            "args={args:?}\nstdout:\n{}\n\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let parsed: Value =
+            serde_json::from_slice(&output.stdout).expect("stdout should be valid JSON");
+        assert_eq!(parsed["kind"], expected_kind, "args={args:?}");
+        assert_eq!(parsed["action"], expected_action, "args={args:?}");
+        assert!(
+            matches!(parsed["status"].as_str(), Some("ok" | "warn")),
+            "args={args:?} should report successful local status: {parsed}"
+        );
+        let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+        assert!(
+            !stderr.contains("field \"enabledPlugins\" is deprecated"),
+            "successful JSON surface must not leak config deprecation prose to stderr for args={args:?}:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn local_text_surface_preserves_config_deprecation_stderr_816() {
+    let root = unique_temp_dir("global-text-warning-816");
+    let config_home = root.join("config-home");
+    let home = root.join("home");
+    fs::create_dir_all(&config_home).expect("config home should exist");
+    fs::create_dir_all(&home).expect("home should exist");
+    fs::write(
+        config_home.join("settings.json"),
+        r#"{"enabledPlugins": {}}"#,
+    )
+    .expect("deprecated config fixture should write");
+
+    let envs = [
+        (
+            "CLAW_CONFIG_HOME",
+            config_home.to_str().expect("utf8 config home"),
+        ),
+        ("HOME", home.to_str().expect("utf8 home")),
+    ];
+
+    let output = run_claw(&root, &["doctor"], &envs);
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\n\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+    assert!(
+        stderr.contains("field \"enabledPlugins\" is deprecated"),
+        "text-mode doctor should preserve human config deprecation warnings on stderr"
+    );
 }
 
 fn assert_json_command(current_dir: &Path, args: &[&str]) -> Value {
@@ -3124,11 +3338,12 @@ fn skills_list_flag_shaped_filter_returns_unknown_option_792() {
 }
 
 #[test]
-fn plugins_list_flag_shaped_filter_returns_unknown_option_793() {
+fn plugins_list_flag_shaped_filter_returns_cli_parse_on_stdout_793_817() {
     // #793: `claw plugins list --bogus-flag` silently returned status:"ok" with empty
     // plugins list instead of an error. The list filter branch in print_plugins treated
     // "--bogus-flag" as an id substring filter and found no matches, producing a false-positive.
-    // Fix: added flag-prefix guard; filter tokens starting with "-" now return unknown_option.
+    // #817: in JSON mode, handled local parse errors now return error_kind:"cli_parse"
+    // on stdout with stderr empty.
     let root = unique_temp_dir("plugins-list-flag-793");
     fs::create_dir_all(&root).expect("temp dir");
     std::process::Command::new("git")
@@ -3152,19 +3367,16 @@ fn plugins_list_flag_shaped_filter_returns_unknown_option_793() {
         !output.status.success(),
         "plugins list --unknown-flag must exit non-zero (#793)"
     );
-    // #803: the early flag guard now returns Err before the JSON branch,
-    // so the error envelope goes to stderr via the main error handler.
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let j: serde_json::Value = stderr
-        .lines()
-        .find(|l| l.trim_start().starts_with('{'))
-        .and_then(|l| serde_json::from_str(l).ok())
-        .expect("plugins list flag-filter should emit valid JSON on stderr");
+    assert_eq!(output.status.code(), Some(1), "exit code must be 1 (#817)");
+    // #817: handled JSON local parse errors stay on stdout, with stderr empty.
     assert!(
-        j["error_kind"] == "unknown_option" || j["error_kind"] == "cli_parse",
-        "plugins list flag-shaped filter must return typed error, got {:?}",
-        j["error_kind"]
+        output.stderr.is_empty(),
+        "plugins list flag-filter JSON error must keep stderr empty (#817), got: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let j: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .expect("plugins list flag-filter should emit valid JSON on stdout");
+    assert_eq!(j["error_kind"], "cli_parse");
     assert_eq!(j["status"], "error");
     let h = j["hint"]
         .as_str()
@@ -3480,6 +3692,62 @@ fn plugins_extra_args_have_non_null_hint_797() {
     assert!(
         h.contains("plugins") || h.contains("Usage"),
         "hint should reference plugins usage, got: {h:?}"
+    );
+}
+
+#[test]
+fn plugins_list_trailing_dash_json_error_uses_stdout_817() {
+    // ROADMAP #817: JSON inventory/local parse errors are machine-readable on
+    // stdout. `plugins list --` used to route through the top-level error path,
+    // leaving stdout empty and writing the JSON envelope to stderr.
+    let root = unique_temp_dir("plugins-list-dash-817");
+    fs::create_dir_all(&root).expect("temp dir");
+
+    let output = run_claw(
+        &root,
+        &["--output-format", "json", "plugins", "list", "--"],
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "plugins list -- must exit non-zero (#817)"
+    );
+    assert_eq!(output.status.code(), Some(1), "exit code must be 1 (#817)");
+    assert!(
+        output.stderr.is_empty(),
+        "JSON parse error must keep stderr empty (#817), got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let j: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout should be JSON error (#817)");
+    assert_eq!(j["kind"], "plugin");
+    assert_eq!(j["action"], "list");
+    assert_eq!(j["status"], "error");
+    assert_eq!(j["error_kind"], "cli_parse");
+    assert_eq!(j["unexpected"], "--");
+}
+
+#[test]
+fn plugins_list_trailing_dash_text_error_stays_on_stderr_817() {
+    let root = unique_temp_dir("plugins-list-dash-text-817");
+    fs::create_dir_all(&root).expect("temp dir");
+
+    let output = run_claw(&root, &["plugins", "list", "--"], &[]);
+    assert!(
+        !output.status.success(),
+        "plugins list -- text mode must exit non-zero (#817)"
+    );
+    assert_eq!(output.status.code(), Some(1), "exit code must be 1 (#817)");
+    assert!(
+        output.stdout.is_empty(),
+        "text parse error should not emit stdout (#817), got: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[error-kind: cli_parse]"), "{stderr}");
+    assert!(
+        stderr.contains("unknown option for `claw plugins list`: --"),
+        "{stderr}"
     );
 }
 

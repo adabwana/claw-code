@@ -1160,7 +1160,11 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
         return action;
     }
 
-    let permission_mode = permission_mode_override.unwrap_or_else(default_permission_mode);
+    // Keep config-backed defaults lazy so pure-local JSON surfaces (notably
+    // `claw --output-format json config`) can report config warnings
+    // structurally without an earlier default-resolution load writing prose
+    // warnings to stderr.
+    let permission_mode = || permission_mode_override.unwrap_or_else(default_permission_mode);
 
     match rest[0].as_str() {
         "dump-manifests" => parse_dump_manifests_args(&rest[1..], output_format),
@@ -1304,7 +1308,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                     model,
                     output_format,
                     allowed_tools,
-                    permission_mode,
+                    permission_mode: permission_mode(),
                     compact,
                     base_commit,
                     reasoning_effort: reasoning_effort.clone(),
@@ -1341,7 +1345,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 model,
                 output_format,
                 allowed_tools,
-                permission_mode,
+                permission_mode: permission_mode(),
                 compact,
                 base_commit: base_commit.clone(),
                 reasoning_effort: reasoning_effort.clone(),
@@ -1353,7 +1357,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
             model,
             output_format,
             allowed_tools,
-            permission_mode,
+            permission_mode(),
             compact,
             base_commit,
             reasoning_effort,
@@ -1392,7 +1396,7 @@ fn parse_args(args: &[String]) -> Result<CliAction, String> {
                 model,
                 output_format,
                 allowed_tools,
-                permission_mode,
+                permission_mode: permission_mode(),
                 compact,
                 base_commit,
                 reasoning_effort: reasoning_effort.clone(),
@@ -2413,6 +2417,24 @@ impl DiagnosticCheck {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ConfigWarningMode {
+    EmitStderr,
+    SuppressStderr,
+}
+
+fn load_config_with_warning_mode(
+    loader: &ConfigLoader,
+    mode: ConfigWarningMode,
+) -> Result<runtime::RuntimeConfig, runtime::ConfigError> {
+    match mode {
+        ConfigWarningMode::EmitStderr => loader.load(),
+        ConfigWarningMode::SuppressStderr => loader
+            .load_collecting_warnings()
+            .map(|(runtime_config, _warnings)| runtime_config),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DoctorReport {
     checks: Vec<DiagnosticCheck>,
@@ -2502,10 +2524,12 @@ fn render_diagnostic_check(check: &DiagnosticCheck) -> String {
     lines.join("\n")
 }
 
-fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
+fn render_doctor_report(
+    config_warning_mode: ConfigWarningMode,
+) -> Result<DoctorReport, Box<dyn std::error::Error>> {
     let cwd = env::current_dir()?;
     let config_loader = ConfigLoader::default_for(&cwd);
-    let config = config_loader.load();
+    let config = load_config_with_warning_mode(&config_loader, config_warning_mode);
     let discovered_config = config_loader.discover();
     let project_context = ProjectContext::discover_with_git(&cwd, DEFAULT_DATE)?;
     let (project_root, git_branch) =
@@ -2558,7 +2582,10 @@ fn render_doctor_report() -> Result<DoctorReport, Box<dyn std::error::Error>> {
 }
 
 fn run_doctor(output_format: CliOutputFormat) -> Result<(), Box<dyn std::error::Error>> {
-    let report = render_doctor_report()?;
+    let report = render_doctor_report(match output_format {
+        CliOutputFormat::Json => ConfigWarningMode::SuppressStderr,
+        CliOutputFormat::Text => ConfigWarningMode::EmitStderr,
+    })?;
     let message = report.render();
     match output_format {
         CliOutputFormat::Text => println!("{message}"),
@@ -4640,7 +4667,12 @@ fn run_resume_command(
                 _ => {}
             }
             let cwd = env::current_dir()?;
-            let payload = plugins_command_payload_for(&cwd, action.as_deref(), target.as_deref())?;
+            let payload = plugins_command_payload_for(
+                &cwd,
+                action.as_deref(),
+                target.as_deref(),
+                ConfigWarningMode::EmitStderr,
+            )?;
             let action_str = action.as_deref().unwrap_or("list");
             let enabled_count = payload
                 .plugins
@@ -4674,7 +4706,7 @@ fn run_resume_command(
             })
         }
         SlashCommand::Doctor => {
-            let report = render_doctor_report()?;
+            let report = render_doctor_report(ConfigWarningMode::EmitStderr)?;
             Ok(ResumeCommandOutcome {
                 session: session.clone(),
                 message: Some(report.render()),
@@ -5980,7 +6012,10 @@ impl LiveCli {
                 false
             }
             SlashCommand::Doctor => {
-                println!("{}", render_doctor_report()?.render());
+                println!(
+                    "{}",
+                    render_doctor_report(ConfigWarningMode::EmitStderr)?.render()
+                );
                 false
             }
             SlashCommand::History { count } => {
@@ -6401,13 +6436,41 @@ impl LiveCli {
         if action.as_deref() == Some("list") {
             if let Some(filter) = target.as_deref() {
                 if filter.starts_with('-') {
+                    if matches!(output_format, CliOutputFormat::Json) {
+                        // ROADMAP #817: this is a handled local inventory parse error.
+                        // Keep it on stdout in JSON mode so `plugins list --` matches the
+                        // sibling JSON inventory/local surfaces instead of falling through
+                        // to the top-level stderr error path.
+                        let obj = json!({
+                            "type": "error",
+                            "kind": "plugin",
+                            "action": "list",
+                            "status": "error",
+                            "error_kind": "cli_parse",
+                            "error": format!("unknown option for `claw plugins list`: {filter}"),
+                            "message": format!("unknown option for `claw plugins list`: {filter}"),
+                            "unexpected": filter,
+                            "hint": "Usage: claw plugins list [<filter>]\nFilters are id substrings, not flags.",
+                            "exit_code": 1,
+                        });
+                        println!("{}", serde_json::to_string_pretty(&obj)?);
+                        std::process::exit(1);
+                    }
                     return Err(format!(
                         "unknown option for `claw plugins list`: {filter}\nUsage: claw plugins list [<filter>]\nFilters are id substrings, not flags."
                     ).into());
                 }
             }
         }
-        let payload = plugins_command_payload_for(&cwd, action, target)?;
+        let payload = plugins_command_payload_for(
+            &cwd,
+            action,
+            target,
+            match output_format {
+                CliOutputFormat::Json => ConfigWarningMode::SuppressStderr,
+                CliOutputFormat::Text => ConfigWarningMode::EmitStderr,
+            },
+        )?;
         match output_format {
             CliOutputFormat::Text => {
                 // #806: text-mode show must return error when plugin not found (parity with JSON)
@@ -6473,20 +6536,6 @@ impl LiveCli {
                     }
                 } else if is_list_action {
                     if let Some(filter) = target {
-                        // #793: flag-shaped tokens silently became substring filters on
-                        // plugins list, returning empty success instead of an error.
-                        if filter.starts_with('-') {
-                            let obj = json!({
-                                "kind": "plugin",
-                                "action": "list",
-                                "status": "error",
-                                "error_kind": "unknown_option",
-                                "unexpected": filter,
-                                "hint": "Usage: claw plugins list [<filter>]\nFilters are id substrings, not flags.",
-                            });
-                            println!("{}", serde_json::to_string_pretty(&obj)?);
-                            std::process::exit(1);
-                        }
                         let needle = filter.to_lowercase();
                         payload
                             .plugins
@@ -6734,7 +6783,8 @@ impl LiveCli {
         target: Option<&str>,
     ) -> Result<bool, Box<dyn std::error::Error>> {
         let cwd = env::current_dir()?;
-        let payload = plugins_command_payload_for(&cwd, action, target)?;
+        let payload =
+            plugins_command_payload_for(&cwd, action, target, ConfigWarningMode::EmitStderr)?;
         println!("{}", payload.message);
         if payload.reload_runtime {
             self.reload_runtime_features()?;
@@ -7888,9 +7938,50 @@ fn render_export_help_json() -> serde_json::Value {
     })
 }
 
+fn render_doctor_help_json() -> serde_json::Value {
+    json!({
+        "kind": "help",
+        "action": "help",
+        "status": "ok",
+        "topic": "doctor",
+        "command": "doctor",
+        "schema_version": "1.0",
+        "usage": "claw doctor [--output-format <format>]",
+        "purpose": "diagnose local auth, config, workspace, sandbox, boot preflight, and build metadata",
+        "formats": ["text", "json"],
+        "local_only": true,
+        "requires_credentials": false,
+        "requires_provider_request": false,
+        "requires_session_resume": false,
+        "mutates_workspace": false,
+        "output_fields": ["kind", "action", "status", "message", "report", "has_failures", "summary", "checks"],
+        "check_names": ["auth", "config", "install source", "workspace", "boot preflight", "sandbox", "system"],
+        "status_values": ["ok", "warn", "fail"],
+        "options": [
+            {
+                "name": "--output-format",
+                "value": "<format>",
+                "values": ["text", "json"],
+                "default": "text",
+                "description": "format for the doctor report or help envelope"
+            },
+            {
+                "name": "--help",
+                "aliases": ["-h"],
+                "description": "show help for the doctor command without running diagnostics"
+            }
+        ],
+        "related": ["/doctor", "claw --resume latest /doctor"],
+        "message": render_help_topic(LocalHelpTopic::Doctor),
+    })
+}
+
 fn render_help_topic_json(topic: LocalHelpTopic) -> serde_json::Value {
     if topic == LocalHelpTopic::Export {
         return render_export_help_json();
+    }
+    if topic == LocalHelpTopic::Doctor {
+        return render_doctor_help_json();
     }
 
     json!({
@@ -9091,9 +9182,11 @@ fn plugins_command_payload_for(
     cwd: &Path,
     action: Option<&str>,
     target: Option<&str>,
+    config_warning_mode: ConfigWarningMode,
 ) -> Result<PluginsCommandPayload, Box<dyn std::error::Error>> {
     let loader = ConfigLoader::default_for(cwd);
-    let (runtime_config, config_load_error) = match loader.load() {
+    let loaded_config = load_config_with_warning_mode(&loader, config_warning_mode);
+    let (runtime_config, config_load_error) = match loaded_config {
         Ok(runtime_config) => (runtime_config, None),
         Err(error) => (runtime::RuntimeConfig::empty(), Some(error.to_string())),
     };
@@ -12762,8 +12855,13 @@ mod tests {
 
         let previous_config_home = std::env::var("CLAW_CONFIG_HOME").ok();
         std::env::set_var("CLAW_CONFIG_HOME", &config_home);
-        let payload = super::plugins_command_payload_for(&cwd, None, None)
-            .expect("plugins list should not hard-fail on malformed MCP config");
+        let payload = super::plugins_command_payload_for(
+            &cwd,
+            None,
+            None,
+            super::ConfigWarningMode::EmitStderr,
+        )
+        .expect("plugins list should not hard-fail on malformed MCP config");
         match previous_config_home {
             Some(value) => std::env::set_var("CLAW_CONFIG_HOME", value),
             None => std::env::remove_var("CLAW_CONFIG_HOME"),
