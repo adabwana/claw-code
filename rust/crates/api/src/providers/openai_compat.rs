@@ -282,77 +282,34 @@ impl OpenAiCompatClient {
     normalized.model = original_model; 
 
     Ok(normalized)
-}
-        // Some backends return {"error":{"message":"...","type":"...","code":...}}
-        // instead of a valid completion object. Check for this before attempting
-        // full deserialization so the user sees the actual error, not a cryptic
-        // "missing field 'id'" parse failure.
-        if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(err_obj) = raw.get("error") {
-                let msg = err_obj
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("provider returned an error")
-                    .to_string();
-                let code = err_obj
-                    .get("code")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|c| c as u16);
-                return Err(ApiError::Api {
-                    status: reqwest::StatusCode::from_u16(code.unwrap_or(400))
-                        .unwrap_or(reqwest::StatusCode::BAD_REQUEST),
-                    error_type: err_obj
-                        .get("type")
-                        .and_then(|t| t.as_str())
-                        .map(str::to_owned),
-                    message: Some(msg),
-                    request_id,
-                    body,
-                    retryable: false,
-                    suggested_action: suggested_action_for_status(
-                        reqwest::StatusCode::from_u16(code.unwrap_or(400))
-                            .unwrap_or(reqwest::StatusCode::BAD_REQUEST),
-                    ),
-                    retry_after: None,
-                });
-            }
-        }
-        let payload = serde_json::from_str::<ChatCompletionResponse>(&body).map_err(|error| {
-            ApiError::json_deserialize(self.config.provider_name, &request.model, &body, error)
-        })?;
-        let mut normalized = normalize_response(&request.model, payload)?;
-        if normalized.request_id.is_none() {
-            normalized.request_id = request_id;
-        }
-        Ok(normalized)
     }
 
-pub async fn stream_message(
-    &self,
-    request: &MessageRequest,
-) -> Result<MessageStream, ApiError> {
-    // 1. Keep track of the original model name
-    let original_model = request.model.clone();
-    let canonical = resolve_model_alias(&request.model);
-    
-    // 2. Clean it up for DeepSeek
-    let downstream_model = strip_provider_prefix(&canonical);
+    pub async fn stream_message(
+        &self,
+        request: &MessageRequest,
+    ) -> Result<MessageStream, ApiError> {
+        // 1. Keep track of the original model name
+        let original_model = request.model.clone();
+        let canonical = resolve_model_alias(&request.model);
 
-    let mut streaming_request = request.clone().with_streaming();
-    streaming_request.model = downstream_model;
+        // 2. Clean it up for DeepSeek
+        let downstream_model = strip_provider_prefix(&canonical);
 
-    preflight_message_request(&streaming_request)?;
-    let response = self.send_with_retry(&streaming_request).await?;
+        let mut streaming_request = request.clone().with_streaming();
+        streaming_request.model = downstream_model;
 
-    Ok(MessageStream {
-        request_id: request_id_from_headers(response.headers()),
-        response,
-        parser: OpenAiSseParser::with_context(self.config.provider_name, original_model.clone()),
-        pending: VecDeque::new(),
-        done: false,
-        state: StreamState::new(original_model), // 3. Use the original name here
-    })
-}
+        preflight_message_request(&streaming_request)?;
+        let response = self.send_with_retry(&streaming_request).await?;
+
+        Ok(MessageStream {
+            request_id: request_id_from_headers(response.headers()),
+            response,
+            parser: OpenAiSseParser::with_context(self.config.provider_name, original_model.clone()),
+            pending: VecDeque::new(),
+            done: false,
+            state: StreamState::new(original_model), // 3. Use the original name here
+        })
+    }
 
     async fn send_with_retry(
         &self,
